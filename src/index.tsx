@@ -48,8 +48,10 @@ try {
 
         const { indexData, loading, refresh } = useDialogIndex(sessionId, agentId);
         const totalCards = indexData.stats.totalCards;
-        const totalCardsRef = useRef(totalCards);
-        totalCardsRef.current = totalCards; // Keep ref in sync during render
+
+        // Used by useViewportTracker for viewport calculation.
+        // Note: navigation (navigateToMessage) uses getActualSDKCount() from
+        // the DOM instead, because the SDK may not load all cards into DOM.
 
         // Debounced refresh for DOM-triggered updates (avoids rapid API calls during streaming)
         const debouncedRefresh = useMemo(() => {
@@ -134,18 +136,20 @@ try {
         //   [0] spacer      [1] newest-agent  [2] newest-user
         //   [3] newer-agent [4] newer-user     ... [N-2] oldest-agent [N-1] oldest-user
         //
-        // Key insight: parserIdx is assigned per SDK card (i.e. per turn).
-        // In the DOM, each turn produces 2 children: agent card + user bubble.
-        // totalCards = total SDK cards = total turns = DOM children count - 1 (minus spacer).
+        // Key insight: each SDK card = 1 DOM element (bubble-start or bubble-end).
+        // DOM children order = newest SDK card first, oldest last.
+        // children[1] = newest SDK card (index = actualSDKCount-1)
+        // children[n] = SDK card with index = actualSDKCount - n
         //
-        // Direct mapping: children_0 = spacer, children_1 = parserIdx=(totalCards-1), ...
-        // children[ totalCards - parserIdx ] = the correct element for parserIdx.
+        // So the correct DOM position for parserIdx is:
+        //   childrenIndex = spacerOffset + actualSDKCount - 1 - parserIdx
         //
-        // So: childrenIndex = totalCards - parserIdx
-        //
-        // For topic (even parserIdx): that index points to the user bubble directly.
-        // For assistant (odd parserIdx): that index points to the agent card;
-        //   if you want to scroll to user, go to nextElementSibling.
+        // CRITICAL: use actualSDKCount (bubbles currently in DOM), NOT the
+        // parser's totalCards. The parser's totalCards is the TOTAL from the
+        // API response, but the SDK only loads a subset into the DOM at any
+        // time (pagination+rendering limits). Using totalCards would produce
+        // a wrong childrenIndex that points to a much newer card (offset =
+        // totalCards - actualSDKCount positions).
         //
         // Loading strategy: if target is not in DOM, scroll the SDK's load-more
         // sentinel element into view to trigger its native IntersectionObserver,
@@ -155,29 +159,37 @@ try {
             const container = chatContainerRef.current;
             if (!container) return;
 
-            const tc = totalCardsRef.current;
-            if (tc <= 0) return;
-
             const bubbleList =
               container.querySelector(".qwenpaw-bubble-list") || container;
 
-            // Direct child index in the bubbleList (0 = spacer, 1 = newest, ...)
-            const childrenIndex = tc - parserIdx;
             const isTopic = parserIdx % 2 === 0;
+
+            const getActualSDKCount = (): number => {
+              return Array.from(bubbleList.children).filter(
+                (el) =>
+                  el.classList.contains("qwenpaw-bubble-start") ||
+                  el.classList.contains("qwenpaw-bubble-end")
+              ).length;
+            };
 
             const getTarget = (): HTMLElement | null => {
               const cl = bubbleList.children;
-              return childrenIndex >= 0 && childrenIndex < cl.length
-                ? (cl[childrenIndex] as HTMLElement)
+              const actual = getActualSDKCount();
+              // spacer at children[0], SDK cards start at children[1]
+              const idx = 1 + actual - 1 - parserIdx;
+              return idx >= 1 && idx < cl.length
+                ? (cl[idx] as HTMLElement)
                 : null;
             };
 
             let target = getTarget();
 
             // If target not in DOM, trigger SDK native loadMore by scrolling
-            // the load-more sentinel into view. Retry up to 5 batches.
+            // the load-more sentinel into view. Retry up to 9 batches (each
+            // batch ≈ 10 SDK cards, covering up to ~90 cards).
             if (!target) {
-              for (let attempt = 0; attempt < 6; attempt++) {
+              let prevCount = getActualSDKCount();
+              for (let attempt = 0; attempt < 9; attempt++) {
                 const loadMore = bubbleList.querySelector(
                   ".qwenpaw-bubble-list-load-more"
                 ) as HTMLElement | null;
@@ -201,6 +213,17 @@ try {
                   );
                   break;
                 }
+                // Detect DOM plateau: if bubble count hasn't grown after a
+                // full cycle, all available cards are loaded — stop retrying.
+                const newCount = getActualSDKCount();
+                if (newCount === prevCount) {
+                  console.log(
+                    LOG,
+                    `DOM stable at ${prevCount} bubbles, no more cards to load`
+                  );
+                  break;
+                }
+                prevCount = newCount;
               }
             }
 

@@ -1,0 +1,35 @@
+{
+  "hooks": {
+    "postToolUse": [
+      {
+        "name": "type-check",
+        "description": "Run TypeScript type check after editing .ts/.tsx files",
+        "match": {
+          "include": ["src/**/*.ts", "src/**/*.tsx"]
+        },
+        "command": "npx tsc --noEmit",
+        "cwd": "."
+      }
+    ],
+    "preToolUse": [
+      {
+        "name": "protect-lockfile",
+        "description": "Block editing of package-lock.json",
+        "match": {
+          "include": ["package-lock.json"]
+        },
+        "action": "block",
+        "message": "⚠️ package-lock.json deve essere gestito solo tramite npm install/update. Non modificarlo manualmente."
+      }
+    ]
+  },
+  "permissions": {
+    "allow": [
+      "Edit",
+      "Write",
+      "Bash(npm run build:*)",
+      "Bash(npx tsc:*)",
+      "Bash(git commit:*)"
+    ]
+  }
+}
