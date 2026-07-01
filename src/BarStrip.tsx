@@ -16,6 +16,7 @@ interface BarStripProps {
   activeBubbleIndex: number;
   theme: ThemeType;
   onNavigate: (bubbleIndex: number) => void;
+  isLoading?: boolean;
 }
 
 const SECTION_GAP = 10;
@@ -42,6 +43,7 @@ export function BarStrip({
   activeBubbleIndex,
   theme,
   onNavigate,
+  isLoading = false,
 }: BarStripProps) {
   const [activeGroup, setActiveGroup] = useState<IndexGroup>("topic");
   const [hovered, setHovered] = useState(false);
@@ -231,11 +233,28 @@ export function BarStrip({
       onMouseLeave={handleMouseLeave}
     >
       <div style={{ height: SWITCHER_HEIGHT, display: "flex", alignItems: "center" }}>
-        <GroupSwitcher
-          group={activeGroup}
-          theme={theme}
-          onCycle={handleCycleGroup}
-        />
+        {isLoading ? (
+          <div
+            style={{
+              fontSize: 11,
+              color: theme === "dark" ? "rgba(255,255,255,0.45)" : "rgba(0,0,0,0.4)",
+              textAlign: "right",
+              width: 40,
+              lineHeight: 1.2,
+              userSelect: "none",
+            }}
+          >
+            对话
+            <br />
+            加载中…
+          </div>
+        ) : (
+          <GroupSwitcher
+            group={activeGroup}
+            theme={theme}
+            onCycle={handleCycleGroup}
+          />
+        )}
       </div>
 
       <div

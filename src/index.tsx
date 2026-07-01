@@ -60,8 +60,11 @@ try {
           };
         }, [refresh]);
 
-        const { cardCount: _cc } = useMessageMap(chatContainerRef, debouncedRefresh, containerReady);
+        const { cardCount: _cc, loadCardsToPosition } = useMessageMap(chatContainerRef, debouncedRefresh, containerReady);
         const activeBubbleIndex = useViewportTracker(chatContainerRef, totalCards, containerReady);
+
+        // Navigation loading state — shows "对话加载中…" in BarStrip
+        const [isNavigating, setIsNavigating] = useState(false);
 
         // Refresh index when page becomes visible again
         useEffect(() => {
@@ -134,17 +137,12 @@ try {
         //   [0] spacer      [1] newest-agent  [2] newest-user
         //   [3] newer-agent [4] newer-user     ... [N-2] oldest-agent [N-1] oldest-user
         //
-        // Key insight: each SDK card = 1 DOM element.
-        // DOM children order = newest SDK card first, oldest last.
-        // SDK loads cards from newest downward: indices S-1, S-2, ..., S-M.
+        // Correct DOM position: childrenIndex = totalCards - parserIdx
         //
-        // Correct DOM position for SDK card at index parserIdx:
-        //   childrenIndex = totalCards - parserIdx
-        // (totalCards = S = total SDK cards from parser = total card groups)
-        //
-        // When target card is NOT yet loaded into DOM, childrenIndex >= children.length.
-        // Need to trigger SDK loadMore until children.length > childrenIndex.
-        // Each loadMore batch loads PAGE_SIZE=10 SDK cards.
+        // If target not in DOM: use scrollToLoadMore to trigger SDK's native
+        // IntersectionObserver (fiber dispatch won't work — SDK page state
+        // is decoupled from actual DOM rendering). Show "对话加载中…" indicator
+        // via isNavigating during loading, then one final scroll to target.
         const navigateToMessage = useCallback(
           async (parserIdx: number) => {
             const container = chatContainerRef.current;
@@ -168,54 +166,47 @@ try {
 
             let target = getTarget();
 
-            // If target not in DOM yet, calculate how many batches needed.
-            // Each loadMore batch loads ~PAGE_SIZE SDK cards.
             if (!target) {
-              const PAGE_SIZE = 10;
-              const currentBubbles = Array.from(bubbleList.children).filter(
-                (el) =>
-                  el.classList.contains("qwenpaw-bubble-start") ||
-                  el.classList.contains("qwenpaw-bubble-end")
-              ).length;
-              // Cards needed = target position - current position + margin
-              // totalPages = ceil(neededCards / PAGE_SIZE) + 1 safety margin
-              const cardsNeeded = childrenIndex - currentBubbles + 1;
-              const totalBatches = Math.ceil(cardsNeeded / PAGE_SIZE) + 1;
-              console.log(
-                LOG,
-                `need ${cardsNeeded} more cards (${totalBatches} batches) for parserIdx ${parserIdx}`
-              );
-
-              let prevCount = currentBubbles;
-              for (let attempt = 0; attempt < totalBatches; attempt++) {
-                const loadMore = bubbleList.querySelector(
-                  ".qwenpaw-bubble-list-load-more"
-                ) as HTMLElement | null;
-                if (!loadMore) {
-                  console.log(LOG, "no more cards to load (load-more gone)");
-                  break;
-                }
-                loadMore.scrollIntoView({ block: "start" });
-                // Wait for SDK to process + React re-render
-                await new Promise((r) => setTimeout(r, 800));
-                target = getTarget();
-                if (target) {
-                  console.log(
-                    LOG,
-                    `target found after ${attempt + 1}/${totalBatches} batches`
-                  );
-                  break;
-                }
-                const newCount = Array.from(bubbleList.children).filter(
+              setIsNavigating(true);
+              try {
+                const currentBubbles = Array.from(bubbleList.children).filter(
                   (el) =>
                     el.classList.contains("qwenpaw-bubble-start") ||
                     el.classList.contains("qwenpaw-bubble-end")
                 ).length;
-                if (newCount === prevCount) {
-                  console.log(LOG, `DOM stable at ${prevCount}, no more cards`);
-                  break;
+                const cardsNeeded = childrenIndex - currentBubbles + 1;
+                const totalBatches = Math.ceil(cardsNeeded / 10) + 1;
+                console.log(
+                  LOG, `need ${cardsNeeded} cards (${totalBatches} batches) for parserIdx ${parserIdx}`
+                );
+                let prevCount = currentBubbles;
+                for (let attempt = 0; attempt < totalBatches; attempt++) {
+                  const loadMore = bubbleList.querySelector(
+                    ".qwenpaw-bubble-list-load-more"
+                  ) as HTMLElement | null;
+                  if (!loadMore) {
+                    console.log(LOG, "no more cards to load (load-more gone)");
+                    break;
+                  }
+                  loadMore.scrollIntoView({ block: "start" });
+                  await new Promise((r) => setTimeout(r, 800));
+                  target = getTarget();
+                  if (target) {
+                    console.log(LOG, `target found after ${attempt+1}/${totalBatches} batches`);
+                    break;
+                  }
+                  const newCount = Array.from(bubbleList.children).filter(
+                    (el) => el.classList.contains("qwenpaw-bubble-start") ||
+                            el.classList.contains("qwenpaw-bubble-end")
+                  ).length;
+                  if (newCount === prevCount) {
+                    console.log(LOG, `DOM stable at ${prevCount}`);
+                    break;
+                  }
+                  prevCount = newCount;
                 }
-                prevCount = newCount;
+              } finally {
+                setIsNavigating(false);
               }
             }
 
@@ -290,6 +281,7 @@ try {
                 activeBubbleIndex={activeBubbleIndex}
                 theme={theme}
                 onNavigate={navigateToMessage}
+                isLoading={isNavigating}
               />,
               document.body
             )}

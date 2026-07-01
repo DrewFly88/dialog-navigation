@@ -914,3 +914,45 @@ const totalBatches = Math.ceil(cardsNeeded / PAGE_SIZE) + 1;
 dist/index.js  38.56 KB  (gzip: 10.89 kB)
 ```
 
+---
+
+## 17. 无声加载 + 加载提示 UI（2026-07-01）
+
+### 17.1 加载方式确定
+
+经过验证，fiber dispatch 无法触发 SDK 实际加载卡片（SDK 的 `useState` page 值与 DOM 渲染脱节）。**scrollToLoadMore 是唯一能实际触发 SDK 卡片加载的方法**——通过滚动 load-more 哨兵进入视口，触发 SDK 原生 IntersectionObserver。
+
+### 17.2 执行流程
+
+```
+用户点击话题条
+  │
+  ├─ target 在 DOM 中？→ 直接跳转（无加载）
+  │
+  └─ target 不在 DOM 中？
+       ├─ setIsNavigating(true) → BarStrip 显示 "对话加载中…"
+       ├─ 循环：scrollIntoView(loadMore) + await 800ms + 检查 target
+       │   （每次加载 ~10 张 SDK 卡片，批次数 = ceil(需要卡片数/10)+1）
+       ├─ target 找到后 setIsNavigating(false)
+       └─ 最终一次 scrollIntoView(userBubble) + flash 高亮
+```
+
+### 17.3 UI 设计
+
+- 加载提示"对话加载中…"显示在 BarStrip 顶部（原 GroupSwitcher 位置）
+- 两行小字，灰色半透明，不影响导航条
+- `isNavigating` 状态由 `useState` 控制，加载完成后自动隐藏
+
+### 17.4 修改文件
+
+| 文件 | 变更 |
+|------|------|
+| `src/index.tsx` | 新增 `isNavigating` 状态；`navigateToMessage` 包裹 `setIsNavigating(true/false)`；传 `isLoading` 给 BarStrip |
+| `src/BarStrip.tsx` | 新增 `isLoading` prop；`GroupSwitcher` 位置条件渲染加载提示文字 |
+
+### 17.5 构建产物
+
+```
+dist/index.js  39.14 KB  (gzip: 11.02 kB)
+```
+
