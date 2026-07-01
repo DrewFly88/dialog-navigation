@@ -1002,3 +1002,29 @@ dist/index.js  39.14 KB  (gzip: 11.02 kB)
 dist/index.js  39.24 KB  (gzip: 11.01 kB)
 ```
 
+---
+
+## 19. scrollIntoView behavior auto + 诊断坐标修复（2026-07-01）
+
+### 19.1 问题
+
+`smooth` 滚动动画期间重拉取发生，旧 DOM 元素被分离，`getBoundingClientRect()` 返回 stale 坐标（如 y=-3454, y=2323），无法反映最终位置。
+
+### 19.2 修复
+
+- `behavior: "smooth"` → `behavior: "auto"`：跳转即时完成，坐标在重拉取前读取
+- 诊断日志移出 setTimeout，紧接 scrollIntoView 之后执行
+- setTimeout 仅保留 flash 移除和 scroll-margin-top 恢复
+
+### 19.3 修改文件
+
+| 文件 | 变更 |
+|------|------|
+| `src/index.tsx` | scrollIntoView behavior "smooth" → "auto"；诊断日志移出 setTimeout |
+
+### 19.4 构建产物
+
+```
+dist/index.js  39.52 KB  (gzip: 11.05 kB)
+```
+

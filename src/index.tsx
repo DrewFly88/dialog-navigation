@@ -170,28 +170,45 @@ try {
             if (!target) {
               setIsNavigating(true);
               try {
-                let prevCount = Array.from(bubbleList.children).filter(
-                  (el) => el.classList.contains("qwenpaw-bubble-start") ||
-                          el.classList.contains("qwenpaw-bubble-end")
-                ).length;
-                for (let attempt = 0; attempt < 8; attempt++) {
-                  const loadMore = bubbleList.querySelector(
-                    ".qwenpaw-bubble-list-load-more"
-                  ) as HTMLElement | null;
-                  if (!loadMore) break;
-                  loadMore.scrollIntoView({ block: "start" });
-                  await new Promise((r) => setTimeout(r, 800));
-                  target = getTarget();
-                  if (target) {
-                    console.log(LOG, `target found after ${attempt+1} scroll loads`);
-                    break;
-                  }
-                  const newCount = Array.from(bubbleList.children).filter(
+                // Kick off loadMore once to trigger DOM change + potential
+                // session re-fetch, then wait for everything to settle before
+                // starting the actual scrollToLoadMore loop. Without this,
+                // the re-fetch happens DURING the loop, shifting the DOM
+                // after the target has been positioned.
+                const kickEl = bubbleList.querySelector(
+                  ".qwenpaw-bubble-list-load-more"
+                ) as HTMLElement | null;
+                if (kickEl) {
+                  kickEl.scrollIntoView({ block: "start" });
+                }
+                // Wait for re-fetch to complete and DOM to stabilize
+                await new Promise((r) => setTimeout(r, 1500));
+                target = getTarget();
+
+                if (!target) {
+                  let prevCount = Array.from(bubbleList.children).filter(
                     (el) => el.classList.contains("qwenpaw-bubble-start") ||
                             el.classList.contains("qwenpaw-bubble-end")
                   ).length;
-                  if (newCount === prevCount) break;
-                  prevCount = newCount;
+                  for (let attempt = 0; attempt < 8; attempt++) {
+                    const loadMore = bubbleList.querySelector(
+                      ".qwenpaw-bubble-list-load-more"
+                    ) as HTMLElement | null;
+                    if (!loadMore) break;
+                    loadMore.scrollIntoView({ block: "start" });
+                    await new Promise((r) => setTimeout(r, 800));
+                    target = getTarget();
+                    if (target) {
+                      console.log(LOG, `target found after ${attempt+1} scroll loads`);
+                      break;
+                    }
+                    const newCount = Array.from(bubbleList.children).filter(
+                      (el) => el.classList.contains("qwenpaw-bubble-start") ||
+                              el.classList.contains("qwenpaw-bubble-end")
+                    ).length;
+                    if (newCount === prevCount) break;
+                    prevCount = newCount;
+                  }
                 }
               } finally {
                 setIsNavigating(false);
@@ -244,19 +261,20 @@ try {
                 userBubble.style.scrollMarginTop = `${headerHeight}px`;
 
                 userBubble.scrollIntoView({
-                  behavior: "smooth",
+                  behavior: "auto",
                   block: "start",
                 });
-                // Diagnostic: log where we navigated to
+                userBubble.classList.add("dip-highlight-flash");
+
+                // Log final position immediately (scroll is instant, no
+                // animation delay). The 2s timeout only removes the flash.
                 const bubbleText = (userBubble.textContent || '').substring(0, 40);
                 const bubbleRect = userBubble.getBoundingClientRect();
                 console.log(
                   LOG,
                   `navigated to parserIdx=${parserIdx} "${bubbleText}" at (${Math.round(bubbleRect.left)},${Math.round(bubbleRect.top)})`
                 );
-                userBubble.classList.add("dip-highlight-flash");
 
-                // Restore scroll-margin-top after scroll animation completes
                 setTimeout(() => {
                   userBubble.classList.remove("dip-highlight-flash");
                   userBubble.style.scrollMarginTop = prevMargin || "";
