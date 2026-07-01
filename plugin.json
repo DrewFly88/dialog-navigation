@@ -1,0 +1,11 @@
+{
+  "id": "dialog-index-plugin",
+  "name": "Dialog Index",
+  "version": "0.1.0",
+  "type": "frontend",
+  "description": "对话内容结构化索引导航",
+  "author": "DrewFly88",
+  "entry": {
+    "frontend": "dist/index.js"
+  }
+}

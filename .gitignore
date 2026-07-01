@@ -1,0 +1,17 @@
+# AtomCode local-scope configs (machine-specific)
+.atomcode/local/
+
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+
+# OS files
+Thumbs.db
+.DS_Store
+NUL
+
+# IDE
+.vscode/
+.idea/
