@@ -14,7 +14,7 @@ const BUILD = "v0.7.2-20260630";
 try {
   const host = window.QwenPaw?.host;
   const route = window.QwenPaw?.route;
-  const pluginId = "dialog-index-plugin";
+  const pluginId = "dialog-navigation";
 
   if (!host) {
     console.error(LOG, "host not available");
@@ -313,15 +313,15 @@ try {
     // Register settings page in sidebar
     const menu = (window as any).QwenPaw?.menu;
     const settingsDisposable = route?.add?.(pluginId, {
-      id: "dialog-index-plugin.settings",
-      path: "/plugin/dialog-index-plugin/settings",
+      id: "dialog-navigation.settings",
+      path: "/plugin/dialog-navigation/settings",
       component: SettingsPage,
     });
     const menuDisposable = menu?.add?.(pluginId, {
-      id: "dialog-index-plugin.settings",
+      id: "dialog-navigation.settings",
       label: "对话索引设置",
       icon: "📑",
-      route: "dialog-index-plugin.settings",
+      route: "dialog-navigation.settings",
     });
     console.log(LOG, BUILD, "settings registered:", !!settingsDisposable, !!menuDisposable);
 

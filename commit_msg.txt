@@ -1,8 +1,0 @@
-fix: scrollIntoView behavior auto + diagnostic coordinate fix
-
-- Change scrollIntoView behavior from "smooth" to "auto" (instant jump)
-- Move diagnostic log (getBoundingClientRect) outside setTimeout so it runs
-  before re-fetches detach the DOM element, giving accurate coordinates
-- setTimeout only handles flash removal and scroll-margin restoration
-
-Co-Authored-By: AtomCode (deepseek-v4-flash) <noreply@atomgit.com>

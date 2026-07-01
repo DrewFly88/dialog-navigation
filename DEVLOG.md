@@ -1,4 +1,4 @@
-# dialog-index-plugin 开发日志
+# dialog-navigation 开发日志
 
 > 创建日期: 2026-06-28 | 版本: v0.6.0 | 产物: dist/index.js (34.79 KB)
 

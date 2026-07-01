@@ -1,9 +1,9 @@
 {
-  "id": "dialog-index-plugin",
-  "name": "Dialog Index",
+  "id": "dialog-navigation",
+  "name": "Dialog Navigation",
   "version": "0.1.0",
   "type": "frontend",
-  "description": "对话内容结构化索引导航",
+  "description": "对话内容结构化索引与导航",
   "author": "DrewFly88",
   "entry": {
     "frontend": "dist/index.js"
