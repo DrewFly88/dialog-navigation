@@ -1,4 +1,5 @@
 import { useEffect, useRef, useCallback, useState } from "react";
+import { flushSync } from "../react-shim";
 
 const LOG = "[dialog-index]";
 const PAGE_SIZE = 10; // SDK pagination constant (dY = 10)
@@ -53,38 +54,58 @@ export function useMessageMap(
   }, [chatContainerRef]);
 
   /**
-   * Load cards up to a specific SDK card position via React fiber pagination.
+   * Load cards via React fiber dispatch — silent, no scroll involved.
    *
-   * SDK renders each conversation turn as ONE SDK card, but the DOM gets
-   * 2 elements per turn: agent card + user bubble. The SDK pagination
-   * (dY = 10) controls SDK cards, NOT DOM elements.
+   * SDK renders history via `historyMessages.slice(0, page * PAGE_SIZE)`.
+   * We find the pagination hook via fiber internals and dispatch the
+   * target page to force React to re-render with more cards.
    *
-   * Strategy: 双阶段 dispatch（方案 B）
-   * - 如果 targetPage > currentPage → dispatch(targetPage) 即可
-   * - 如果 targetPage == currentPage → 先 dispatch(1) 降级，再 dispatch(targetPage) 升回
-   *   确保 React 检测到状态变化触发重新渲染
+   * Key improvement over previous versions: we use actual DOM bubble
+   * count (`domPage`) to decide whether dispatch is needed, instead of
+   * the SDK's `useState` currentPage (which may be inflated/out of sync
+   * with actual DOM rendering).
    *
-   * @param sdkCardPos The SDK card position (0 = newest). NOT the DOM element index.
+   * @param sdkCardPos SDK card position needed (0 = newest).
+   * @param bubbleList The bubble-list element (for DOM counting).
    */
   const loadCardsToPosition = useCallback(
-    async (sdkCardPos: number): Promise<void> => {
-      const container = chatContainerRef.current;
-      if (!container) return;
+    async (sdkCardPos: number, bubbleList: HTMLElement): Promise<void> => {
+      // Count actual bubbles in DOM to compute domPage
+      const actualBubbles = Array.from(bubbleList.children).filter(
+        (el) =>
+          el.classList.contains("qwenpaw-bubble-start") ||
+          el.classList.contains("qwenpaw-bubble-end")
+      ).length;
+      const domPage = Math.ceil(actualBubbles / PAGE_SIZE);
 
-      const bubbleList =
-        container.querySelector(".qwenpaw-bubble-list") || container;
+      // Target page: how many pages we need to reach sdkCardPos
+      const targetPage = Math.ceil((sdkCardPos + 1) / PAGE_SIZE) + 1;
+
+      if (domPage >= targetPage) {
+        // Already have enough cards in DOM
+        console.log(LOG, `domPage ${domPage} >= target ${targetPage}, no dispatch needed`);
+        return;
+      }
+
+      console.log(
+        LOG,
+        `need dispatch: domPage ${domPage} < target ${targetPage} for sdkCardPos ${sdkCardPos}`
+      );
 
       const fiberKey = Object.keys(bubbleList).find((k) =>
         k.startsWith("__reactFiber")
       );
       if (!fiberKey) {
-        console.log(LOG, "fiber key not found");
+        console.log(LOG, "fiber key not found, falling back to scroll trigger");
+        // Fallback: trigger loadMore via scroll
+        const loadMore = bubbleList.querySelector(
+          ".qwenpaw-bubble-list-load-more"
+        ) as HTMLElement | null;
+        if (loadMore) {
+          loadMore.scrollIntoView({ block: "start" });
+        }
         return;
       }
-
-      // SDK page size is in SDK cards (turns), not DOM elements.
-      // sdkCardPos is already in SDK-card units, so:
-      const targetPage = Math.ceil((sdkCardPos + 1) / PAGE_SIZE) + 1;
 
       let fiber = (bubbleList as any)[fiberKey];
       let depth = 0;
@@ -100,34 +121,20 @@ export function useMessageMap(
               hook.memoizedState <= 10
             ) {
               try {
-                const currentPage = hook.memoizedState;
-                if (targetPage > currentPage) {
-                  // Normal case: just dispatch the target
-                  hook.queue.dispatch(targetPage);
-                  console.log(
-                    LOG,
-                    `dispatched page ${targetPage} for sdkCardPos ${sdkCardPos} (was ${currentPage})`
-                  );
-                } else if (targetPage === currentPage) {
-                  // Dual-phase dispatch: force a state change by going down first
-                  console.log(
-                    LOG,
-                    `dual-dispatch: current ${currentPage} == target ${targetPage}, dropping to 1 first`
-                  );
+                // Dual-phase dispatch wrapped in flushSync to force
+                // synchronous React re-render (matches SDK's native
+                // loadMore which also uses flushSync).
+                flushSync?.(() => {
                   hook.queue.dispatch(1);
-                  await new Promise((r) => setTimeout(r, 100));
+                });
+                await new Promise((r) => setTimeout(r, 100));
+                flushSync?.(() => {
                   hook.queue.dispatch(targetPage);
-                  console.log(
-                    LOG,
-                    `dual-dispatch: back to page ${targetPage} for sdkCardPos ${sdkCardPos}`
-                  );
-                } else {
-                  // targetPage < currentPage: already loaded enough
-                  console.log(
-                    LOG,
-                    `already loaded page ${currentPage} >= target ${targetPage} for sdkCardPos ${sdkCardPos}`
-                  );
-                }
+                });
+                console.log(
+                  LOG,
+                  `fiber dispatch 1→${targetPage} for sdkCardPos ${sdkCardPos}`
+                );
               } catch {
                 console.warn(LOG, "fiber dispatch failed");
               }
@@ -141,7 +148,13 @@ export function useMessageMap(
         depth++;
       }
 
-      console.log(LOG, "fiber pagination hook not found");
+      console.log(LOG, "fiber hook not found, falling back to scroll trigger");
+      const loadMore = bubbleList.querySelector(
+        ".qwenpaw-bubble-list-load-more"
+      ) as HTMLElement | null;
+      if (loadMore) {
+        loadMore.scrollIntoView({ block: "start" });
+      }
     },
     [chatContainerRef]
   );

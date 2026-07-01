@@ -60,7 +60,7 @@ try {
           };
         }, [refresh]);
 
-        const { cardCount: _cc, loadCardsToPosition } = useMessageMap(chatContainerRef, debouncedRefresh, containerReady);
+        const { cardCount: _cc } = useMessageMap(chatContainerRef, debouncedRefresh, containerReady);
         const activeBubbleIndex = useViewportTracker(chatContainerRef, totalCards, containerReady);
 
         // Navigation loading state — shows "对话加载中…" in BarStrip
@@ -139,10 +139,11 @@ try {
         //
         // Correct DOM position: childrenIndex = totalCards - parserIdx
         //
-        // If target not in DOM: use scrollToLoadMore to trigger SDK's native
-        // IntersectionObserver (fiber dispatch won't work — SDK page state
-        // is decoupled from actual DOM rendering). Show "对话加载中…" indicator
-        // via isNavigating during loading, then one final scroll to target.
+        // If target not in DOM: scroll loadMore into view to trigger SDK's
+        // native IntersectionObserver (only reliable loading mechanism).
+        // Show "对话加载中…" via isNavigating during loading, then one final
+        // scroll to target. Fiber dispatch doesn't work because session
+        // re-fetch (triggered by 500ms polling) resets the dispatched state.
         const navigateToMessage = useCallback(
           async (parserIdx: number) => {
             const container = chatContainerRef.current;
@@ -169,40 +170,27 @@ try {
             if (!target) {
               setIsNavigating(true);
               try {
-                const currentBubbles = Array.from(bubbleList.children).filter(
-                  (el) =>
-                    el.classList.contains("qwenpaw-bubble-start") ||
-                    el.classList.contains("qwenpaw-bubble-end")
+                let prevCount = Array.from(bubbleList.children).filter(
+                  (el) => el.classList.contains("qwenpaw-bubble-start") ||
+                          el.classList.contains("qwenpaw-bubble-end")
                 ).length;
-                const cardsNeeded = childrenIndex - currentBubbles + 1;
-                const totalBatches = Math.ceil(cardsNeeded / 10) + 1;
-                console.log(
-                  LOG, `need ${cardsNeeded} cards (${totalBatches} batches) for parserIdx ${parserIdx}`
-                );
-                let prevCount = currentBubbles;
-                for (let attempt = 0; attempt < totalBatches; attempt++) {
+                for (let attempt = 0; attempt < 8; attempt++) {
                   const loadMore = bubbleList.querySelector(
                     ".qwenpaw-bubble-list-load-more"
                   ) as HTMLElement | null;
-                  if (!loadMore) {
-                    console.log(LOG, "no more cards to load (load-more gone)");
-                    break;
-                  }
+                  if (!loadMore) break;
                   loadMore.scrollIntoView({ block: "start" });
                   await new Promise((r) => setTimeout(r, 800));
                   target = getTarget();
                   if (target) {
-                    console.log(LOG, `target found after ${attempt+1}/${totalBatches} batches`);
+                    console.log(LOG, `target found after ${attempt+1} scroll loads`);
                     break;
                   }
                   const newCount = Array.from(bubbleList.children).filter(
                     (el) => el.classList.contains("qwenpaw-bubble-start") ||
                             el.classList.contains("qwenpaw-bubble-end")
                   ).length;
-                  if (newCount === prevCount) {
-                    console.log(LOG, `DOM stable at ${prevCount}`);
-                    break;
-                  }
+                  if (newCount === prevCount) break;
                   prevCount = newCount;
                 }
               } finally {
@@ -259,6 +247,13 @@ try {
                   behavior: "smooth",
                   block: "start",
                 });
+                // Diagnostic: log where we navigated to
+                const bubbleText = (userBubble.textContent || '').substring(0, 40);
+                const bubbleRect = userBubble.getBoundingClientRect();
+                console.log(
+                  LOG,
+                  `navigated to parserIdx=${parserIdx} "${bubbleText}" at (${Math.round(bubbleRect.left)},${Math.round(bubbleRect.top)})`
+                );
                 userBubble.classList.add("dip-highlight-flash");
 
                 // Restore scroll-margin-top after scroll animation completes

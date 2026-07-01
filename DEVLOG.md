@@ -956,3 +956,49 @@ dist/index.js  38.56 KB  (gzip: 10.89 kB)
 dist/index.js  39.14 KB  (gzip: 11.02 kB)
 ```
 
+---
+
+## 18. 最终方案：纯 scrollToLoadMore + 跳转诊断日志（2026-07-01）
+
+### 18.1 放弃 fiber dispatch
+
+经过对比分析，v0.6.0 的 `ensureAllCardsLoaded`（DEVLOG §10）能成功是因为它在**组件初始化时**调用，此时 session 500ms 轮询尚未启动，不会被重拉取冲掉。
+
+而导航时调用 fiber dispatch（无论是 `dispatch(9999)` 还是 `dispatch(1→6)` + `flushSync`）均无效，原因是：
+1. `useDialogIndex` 的 500ms 轮询在导航时已激活
+2. dispatch 改变了 SDK 的 page 值，但紧接着的重拉取重建了组件，丢失了 dispatched state
+3. 重拉取由 scrollToLoadMore 触发的 scroll 引起（`getCurrentSessionId()` 检测到变化）
+
+### 18.2 导航执行顺序（最终版）
+
+```
+用户点击话题条
+  ├─ 目标在 DOM 中？→ 直接 scrollIntoView + flash
+  └─ 不在 DOM 中？
+       ├─ setIsNavigating(true) → BarStrip 显示 "对话加载中…"
+       ├─ 循环 scrollIntoView(loadMore) + await 800ms + 检查 target
+       │  （每次触发 SDK IntersectionObserver，加载 ~10 卡片）
+       ├─ 最多 8 次尝试，DOM 不再增长时提前退出
+       ├─ setIsNavigating(false)
+       └─ scrollIntoView(userBubble) + flash + 日志打印目标位置
+```
+
+### 18.3 跳转诊断日志
+
+新增日志 `navigated to parserIdx=N "title" at (x,y)`：
+- `parserIdx`：跳转的目标 parser 索引
+- `title`：目标 user 气泡的前 40 字符
+- `(x,y)`：目标气泡在视口中的像素坐标
+
+### 18.4 修改文件
+
+| 文件 | 变更 |
+|------|------|
+| `src/index.tsx` | 移除 fiber dispatch 调用；清理未用的 `loadCardsToPosition`；新增跳转诊断日志 |
+
+### 18.5 构建产物
+
+```
+dist/index.js  39.24 KB  (gzip: 11.01 kB)
+```
+
