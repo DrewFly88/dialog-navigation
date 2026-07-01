@@ -867,44 +867,50 @@ dist/index.js  37.92 KB  (gzip: 10.75 KB)
 
 ---
 
-## 16. 导航索引公式修正 + 渐进加载优化（2026-07-01）
+## 16. 导航公式修正 + 动态分页加载（2026-07-01）
 
-### 16.1 导航索引公式修正（关键错误修复）
+### 16.1 导航公式确认
 
-**问题**：`navigateToMessage` 使用 `childrenIndex = totalCards - parserIdx` 计算 DOM 位置，但 `totalCards` 来自 parser（消息总数/轮次），而实际 DOM 中 SDK 加载的卡片数量（`actualSDKCount`）远小于此值。导致 `childrenIndex` 远大于实际 DOM 长度，`children[childrenIndex]` 指向错误的元素——跳转到比目标新得多的卡片。
+**正确的公式是 `childrenIndex = totalCards - parserIdx`**。
 
-**示例**：parser 的 `totalCards=78`，但 SDK 只加载了 40 个气泡到 DOM。`childrenIndex=78-38=40`，但 `children[40]` 对应 SDK card 0（最旧）而非目标 SDK card 38（第19轮）。
+SDK 从**最新卡片开始向下加载**（索引 S-1, S-2, ..., S-M），DOM 中：
+- `children[1]` = SDK card S-1（最新）
+- `children[N]` = SDK card S-N
+- 因此 `children[totalCards - parserIdx]` 即为目标 SDK card
 
-**修复**：用 DOM 实时气泡计数替换固定的 `totalCards`：
+当目标卡片未加载进 DOM 时 `childrenIndex >= children.length`，需要 loadMore。
+
+### 16.1b 首次尝试的错误公式（已撤回）
+
+首次尝试了 `idx = actualSDKCount - parserIdx`，但此公式错误——它假设 SDK 从最旧卡片开始加载（0, 1, 2, ...），而 SDK 实际从最新卡片开始向下加载（S-1, S-2, ...）。导致索引指向比目标新得多的卡片。
+
+### 16.2 动态批次数计算
+
+将固定循环次数改为根据目标距离动态计算：
+
 ```typescript
-const getActualSDKCount = () => bubbleList.children.filter(
-  el => el.classList.contains('qwenpaw-bubble-start') ||
-        el.classList.contains('qwenpaw-bubble-end')
-).length;
-const idx = 1 + actual - 1 - parserIdx; // = actual - parserIdx
+const cardsNeeded = childrenIndex - currentBubbles + 1;
+const totalBatches = Math.ceil(cardsNeeded / PAGE_SIZE) + 1;
 ```
-此公式在任何加载进度下都能正确映射 `parserIdx` 到 DOM 位置。
 
-### 16.2 loadMore 循环优化
-
-- 循环次数从 6 提升到 9（覆盖 ~90 张 SDK 卡片）
-- 新增 DOM 稳定检测（`DOM plateau`）：当两次迭代间气泡数不再增长时提前退出循环
-- 每批 600ms 等待 + `scrollIntoView({ block: "start" })` 触发 SDK IntersectionObserver
+- `cardsNeeded`：当前气泡数到目标位置所需的额外卡片数
+- `totalBatches`：每批 10 张卡片 + 1 安全余量
+- 例如：target`childrenIndex=40`，当前气泡=10，需 31 张卡片 ≈ 5 批
 
 ### 16.3 代码清理
 
-- 移除 `navigateToMessage` 中对 `totalCardsRef` 的引用
-- 修复因删除 `totalCardsRef` 导致的 `activeBubbleIndex` 重复声明编译错误
+- 恢复 `totalCardsRef` 在 `navigateToMessage` 中的使用
+- 移除 `getActualSDKCount` 辅助函数，内联气泡计数
 
 ### 16.4 修改文件
 
 | 文件 | 变更 |
 |------|------|
-| `src/index.tsx` | 导航公式改为 `actualSDKCount - parserIdx`；loadMore 循环从 6→9；新增 DOM plateau 检测；移除未用的 `totalCardsRef` |
+| `src/index.tsx` | 恢复 `totalCardsRef`；`getTarget` 使用 `totalCards - parserIdx`；动态计算所需 loadMore 批次数 |
 
 ### 16.5 构建产物
 
 ```
-dist/index.js  38.28 KB  (gzip: 10.81 kB)
+dist/index.js  38.56 KB  (gzip: 10.89 kB)
 ```
 
