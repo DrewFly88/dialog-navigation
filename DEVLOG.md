@@ -1082,3 +1082,29 @@ dist/index.js  39.52 KB  (gzip: 11.05 kB)
 dist/index.js  41.90 KB  (gzip: 11.87 kB)
 ```
 
+---
+
+## 21. 导航目标修正：非 topic 条目跳转到 agent 卡片（2026-07-02）
+
+### 21.1 问题
+
+工具/代码/结论三类索引属于 agent 回复内容，但导航跳转目标始终是 user 气泡（`bubble-end`），与用户期望不符。
+
+### 21.2 修复
+
+- 非 topic 条目（`isTopic === false`）`scrollTarget = target` —— 跳到 agent 卡片自身（`bubble-start`）
+- 变量名 `userBubble` → `scrollTarget`，消除语义歧义
+- 去掉了冗余的 `if/else` 分支（两个分支做相同操作）
+
+### 21.3 修改文件
+
+| 文件 | 变更 |
+|------|------|
+| `src/index.tsx` | 非 topic 导航目标改为 agent 卡片；`userBubble` → `scrollTarget` |
+
+### 21.4 构建产物
+
+```
+dist/index.js  41.94 KB  (gzip: 11.89 kB)
+```
+

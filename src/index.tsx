@@ -228,27 +228,14 @@ try {
                 headerHeight = rect.height + 8;
               }
 
-              // Always find the user bubble for both topic and assistant items.
-              // In column-reverse DOM layout, the user bubble (bubble-end) is
-              // the element AFTER the agent card (bubble-start) in visual flow,
-              // which is the next DOM sibling of the agent card.
-              // For topic (even parserIdx): children[tc-parserIdx] IS the user bubble.
-              // For assistant (odd parserIdx): children[tc-parserIdx] is the agent card,
-              //   the user bubble is its nextElementSibling.
-              let userBubble: HTMLElement | null;
-              if (isTopic) {
-                userBubble = target;
-              } else {
-                const sibling = target.nextElementSibling;
-                userBubble =
-                  sibling instanceof HTMLElement &&
-                  (sibling.classList.contains("qwenpaw-bubble-end") ||
-                    sibling.className.includes("bubble-end"))
-                    ? sibling
-                    : target;
-              }
+              // For topic (even parserIdx): children[tc-parserIdx] IS the user
+              // bubble — scroll to it directly.
+              // For assistant items (tool/code/conclusion, odd parserIdx):
+              // children[tc-parserIdx] is the agent card itself. Scroll to
+              // the agent card, NOT the user bubble.
+              const scrollTarget = target;
 
-              if (userBubble) {
+              if (scrollTarget) {
                 // Wait for layout to settle after loadMore batches
                 // This prevents "overshoot" where content-visibility: auto
                 // hasn't computed layout for newly added cards yet.
@@ -257,27 +244,27 @@ try {
 
                 // Apply scroll-margin-top inline so the target clears the
                 // fixed header overlayer.
-                const prevMargin = userBubble.style.scrollMarginTop;
-                userBubble.style.scrollMarginTop = `${headerHeight}px`;
+                const prevMargin = scrollTarget.style.scrollMarginTop;
+                scrollTarget.style.scrollMarginTop = `${headerHeight}px`;
 
-                userBubble.scrollIntoView({
+                scrollTarget.scrollIntoView({
                   behavior: "auto",
                   block: "start",
                 });
-                userBubble.classList.add("dip-highlight-flash");
+                scrollTarget.classList.add("dip-highlight-flash");
 
                 // Log final position immediately (scroll is instant, no
                 // animation delay). The 2s timeout only removes the flash.
-                const bubbleText = (userBubble.textContent || '').substring(0, 40);
-                const bubbleRect = userBubble.getBoundingClientRect();
+                const bubbleText = (scrollTarget.textContent || '').substring(0, 40);
+                const bubbleRect = scrollTarget.getBoundingClientRect();
                 console.log(
                   LOG,
                   `navigated to parserIdx=${parserIdx} "${bubbleText}" at (${Math.round(bubbleRect.left)},${Math.round(bubbleRect.top)})`
                 );
 
                 setTimeout(() => {
-                  userBubble.classList.remove("dip-highlight-flash");
-                  userBubble.style.scrollMarginTop = prevMargin || "";
+                  scrollTarget.classList.remove("dip-highlight-flash");
+                  scrollTarget.style.scrollMarginTop = prevMargin || "";
                 }, 2000);
               }
             }
