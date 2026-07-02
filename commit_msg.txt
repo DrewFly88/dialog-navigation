@@ -1,0 +1,12 @@
+feat: improve tool/code/conclusion parsers with smart extraction
+
+- toolCallParser: meaningful input summaries, error titles, filename-only
+  for paths, smart truncation
+- codeBlockParser: inferCodePurpose() detects function/class/variable
+  names for better titles, extended fileName detection, skip <3 line blocks
+- conclusionParser: fuzzy dedup (edit distance <5), noise filtering,
+  priority ordering (bold > numbered > list)
+- utils.ts: smartTruncate() — clip at natural break (space/punctuation)
+- All four parsers now use smartTruncate for consistent title truncation
+
+Co-Authored-By: AtomCode (deepseek-v4-flash) <noreply@atomgit.com>

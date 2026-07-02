@@ -1028,3 +1028,57 @@ dist/index.js  39.24 KB  (gzip: 11.01 kB)
 dist/index.js  39.52 KB  (gzip: 11.05 kB)
 ```
 
+---
+
+## 20. 工具/代码/结论 三类索引完善（2026-07-02）
+
+### 20.1 工具调用 — toolCallParser.ts
+
+| 改进项 | 当前 | 改进后 |
+|--------|------|--------|
+| 标题格式 | `toolName(param=...)` | `toolName → 参数摘要` |
+| 文件路径参数 | 显示完整路径 | 仅显示文件名 |
+| 错误状态 | `status: "fail"` | 标题直接显示错误摘要：`⚠ 连接超时` |
+| 字符串摘要 | `val.slice(0,20)` | `smartTruncate(val, 15)` 自然断点截断 |
+
+### 20.2 代码片段 — codeBlockParser.ts
+
+| 改进项 | 当前 | 改进后 |
+|--------|------|--------|
+| 标题 | `lang - 首行代码` | `lang - 函数名/类名` 优先推断 |
+| 函数检测 | 无 | `inferCodePurpose()` 解析 function/class/const 定义 |
+| 文件名提取 | 仅检查前 3 行注释 | 扩展 5 行，支持 `File:` 前缀注释 |
+| 短代码过滤 | 不过滤 | 跳过 `<3行` 的代码块 |
+
+示例：`python - import os` → `python - get_event_loop()`
+
+### 20.3 关键结论 — conclusionParser.ts
+
+| 改进项 | 当前 | 改进后 |
+|--------|------|--------|
+| 去重 | 精确匹配 `bubbleIndex:title` | 模糊匹配（编辑距离 < 5） |
+| 噪声过滤 | 无 | 过滤 `<5字符`、纯数字、步骤指示词 |
+| 优先级 | 全部等同 | 加粗 > 编号列表 > 无序列表 |
+
+### 20.4 通用改进
+
+- 新增 `src/parser/utils.ts`，提供 `smartTruncate()` 在自然断点截断
+- 所有 parser 的 title 截断统一使用 `smartTruncate`
+- 各条目导航功能不变（复现已有的 `childrenIndex = totalCards - parserIdx` 公式）
+
+### 20.5 修改文件
+
+| 文件 | 变更 |
+|------|------|
+| `src/parser/utils.ts` | 新增，`smartTruncate()` 智能截断工具 |
+| `src/parser/toolCallParser.ts` | 重写，智能摘要 + 错误标题 + 路径文件名提取 |
+| `src/parser/codeBlockParser.ts` | 重写，函数/类名推断 + 扩展文件名检测 + 短代码过滤 |
+| `src/parser/conclusionParser.ts` | 重写，模糊去重 + 噪声过滤 + 优先级分等 |
+| `src/parser/topicExtractor.ts` | 截断改为 `smartTruncate` |
+
+### 20.6 构建产物
+
+```
+dist/index.js  41.90 KB  (gzip: 11.87 kB)
+```
+

@@ -1,4 +1,5 @@
 import { QPMessage, IndexItem } from "../types";
+import { smartTruncate } from "./utils";
 
 export function extractTopics(messages: QPMessage[]): IndexItem[] {
   const items: IndexItem[] = [];
@@ -14,8 +15,7 @@ export function extractTopics(messages: QPMessage[]): IndexItem[] {
       const text = getPlainText(msg.content);
       if (text.trim().length > 0) {
         const trimmed = text.trim();
-        const title =
-          trimmed.length > 30 ? trimmed.slice(0, 30) + "..." : trimmed;
+        const title = smartTruncate(trimmed, 30);
 
         items.push({
           id: "topic-" + items.length,
