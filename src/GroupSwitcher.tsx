@@ -57,10 +57,11 @@ export function GroupSwitcher({ group, theme, onCycle }: GroupSwitcherProps) {
           whiteSpace: "nowrap",
           lineHeight: 1.2,
           opacity: hovered ? 1 : 0,
-          transition: "opacity 0.3s ease",
-          pointerEvents: "none",
+          transition: "opacity 0.3s ease, filter 0.3s ease",
+          cursor: "pointer",
           zIndex: 1,
         }}
+        onMouseEnter={() => setHovered(true)}
       >
         {label}
       </div>
