@@ -56,13 +56,17 @@ export function extractConclusions(messages: QPMessage[]): IndexItem[] {
   const items: IndexItem[] = [];
   let cardIdx = 0;
   let prevWasUser = true;
+  let childIdx = 0;
 
   for (const msg of messages) {
     if (msg.role === "user") {
       if (!prevWasUser) cardIdx++;
       prevWasUser = true;
     } else {
-      if (prevWasUser) cardIdx++;
+      if (prevWasUser) {
+        cardIdx++;
+        childIdx = 0;
+      }
       prevWasUser = false;
 
       const text = getPlainText(msg.content);
@@ -74,6 +78,7 @@ export function extractConclusions(messages: QPMessage[]): IndexItem[] {
           group: "conclusion",
           title: finding,
           bubbleIndex: cardIdx,
+          childIndex: childIdx++,
           timestamp: "",
         });
       }

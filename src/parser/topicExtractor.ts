@@ -22,6 +22,7 @@ export function extractTopics(messages: QPMessage[]): IndexItem[] {
           group: "topic",
           title,
           bubbleIndex: cardIdx,
+          childIndex: 0,
           timestamp: "",
         });
       }

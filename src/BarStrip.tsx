@@ -15,7 +15,7 @@ interface BarStripProps {
   indexData: IndexData;
   activeBubbleIndex: number;
   theme: ThemeType;
-  onNavigate: (bubbleIndex: number) => void;
+  onNavigate: (bubbleIndex: number, childIndex: number, group: IndexGroup) => void;
   isLoading?: boolean;
 }
 
@@ -329,7 +329,7 @@ export function BarStrip({
                 onMouseEnter={() => setHoveredItemId(item.id)}
                 onMouseLeave={() => setHoveredItemId(null)}
                 onClick={() => {
-                  onNavigate(item.bubbleIndex);
+                  onNavigate(item.bubbleIndex, item.childIndex, item.group);
                   setHovered(false);
                   setHoveredItemId(null);
                 }}
@@ -366,7 +366,7 @@ export function BarStrip({
                   alignSelf: "flex-end",
                 }}
                 onClick={() => {
-                  onNavigate(item.bubbleIndex);
+                  onNavigate(item.bubbleIndex, item.childIndex, item.group);
                   setHovered(false);
                   setHoveredItemId(null);
                 }}

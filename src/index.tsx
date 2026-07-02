@@ -145,7 +145,7 @@ try {
         // scroll to target. Fiber dispatch doesn't work because session
         // re-fetch (triggered by 500ms polling) resets the dispatched state.
         const navigateToMessage = useCallback(
-          async (parserIdx: number) => {
+          async (parserIdx: number, childIndex?: number, group?: string) => {
             const container = chatContainerRef.current;
             if (!container) return;
 
@@ -231,9 +231,30 @@ try {
               // For topic (even parserIdx): children[tc-parserIdx] IS the user
               // bubble — scroll to it directly.
               // For assistant items (tool/code/conclusion, odd parserIdx):
-              // children[tc-parserIdx] is the agent card itself. Scroll to
-              // the agent card, NOT the user bubble.
-              const scrollTarget = target;
+              // children[tc-parserIdx] is the agent card. Use childIndex
+              // to find the precise DOM element within the card.
+              let precisionTarget: HTMLElement | null = target;
+
+              if (!isTopic && childIndex !== undefined && group && target) {
+                let selector = '';
+                if (group === 'tool') {
+                  selector = '[class*="toolCallCompact"]';
+                } else if (group === 'code') {
+                  selector = 'pre code, [class*="toolCallCompact"] code';
+                } else if (group === 'conclusion') {
+                  selector = 'strong, li';
+                }
+                if (selector) {
+                  const candidates = target.querySelectorAll<HTMLElement>(selector);
+                  const precise = candidates[childIndex];
+                  if (precise) {
+                    precisionTarget = precise;
+                    console.log(LOG, `precision: ${group}[${childIndex}] found in card`);
+                  }
+                }
+              }
+
+              const scrollTarget = precisionTarget;
 
               if (scrollTarget) {
                 // Wait for layout to settle after loadMore batches

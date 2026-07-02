@@ -1108,3 +1108,95 @@ dist/index.js  41.90 KB  (gzip: 11.87 kB)
 dist/index.js  41.94 KB  (gzip: 11.89 kB)
 ```
 
+---
+
+## 23. S3/S4 研究发现与问题记录（2026-07-02）
+
+### 23.1 QPContentBlock 类型不匹配
+
+**问题**：工具调用 parser 解析出 0 个工具，但 DOM 中明显有 `toolCards-module__` 元素。
+
+**根因**：QwenPaw API 返回的 content block 类型是 `"tool_call"`，而非 `"tool_use"`。
+
+```
+QwenPaw 源码 (middlewares.py:239):  msg.has_content_blocks("tool_call")
+我们的 parser:                      block.type === "tool_use"  // 永远匹配不到
+```
+
+**修复**：`types.ts` 加入 `"tool_call"`，parser 同时检查两种类型。
+
+### 23.2 实际 block 类型
+
+通过诊断脚本获取当前聊天（Agent: 小妍，82 条消息）的 block 类型分布：
+
+| 类型 | 数量 | 用途 |
+|------|------|------|
+| `text` | 36 | 普通对话文字（markdown） |
+| `data` | 48 | 工具调用（code 执行、search 等） |
+| `file` | 0+ | 文件操作（read/write） |
+| `tool_call` | 0 | 标准工具调用格式（未使用） |
+
+**发现**：QwenPaw 大部分工具调用使用 `type: "data"` 和 `type: "file"`，而非标准的 `tool_use`/`tool_call`。不同工具通过 `name` 字段区分（`code`、`read`、`search` 等）。按 `type` 筛选过于狭窄，应该按 `name` 字段判断。
+
+### 23.3 Agent 卡片 DOM 结构
+
+```
+div.qwenpaw-bubble-start
+ └─ div.qwenpaw-bubble-content-wrapper
+      ├─ div.qwenpaw-flex               ← 头像 + agent 名称
+      ├─ div.qwenpaw-operate-card       ← Thinking 推理过程
+      ├─ div.x-markdown                 ← 回复文字（markdown，含代码块、结论）
+      ├─ details.toolCards-module__*    ← 工具调用（data/file 块渲染）
+      ├─ div.qwenpaw-operate-card       ← 更多 Thinking
+      ├─ details.toolCards-module__*    ← 更多工具调用
+      └─ div.qwenpaw-bubble-footer
+```
+
+### 23.4 S4 状态
+
+精确 DOM 定位导航（用 `childIndex` 在 agent 卡片内找第 N 个匹配元素）已完成并部署，但尚未在真实有工具调用的聊天中验证。
+
+### 23.5 分类现状（待重新定义）
+
+当前三个非 topic 分组的 parser 逻辑均存在数据源问题——它们从 API `messages[]` 解析，但 API 的数据结构和 DOM 的渲染结构有差异：
+
+| 分类 | 当前数据来源 | 当前问题 |
+|------|-------------|---------|
+| **tool** | API 中 `tool_use`/`tool_call` 块 | 不识别 `data`/`file` 块中的工具调用 |
+| **code** | `getPlainText()` 提取 text 块中的 ``` 代码 | 遗漏 tool result 中的代码 |
+| **conclusion** | `getPlainText()` 提取 text 块中的 加粗/列表 | 混入 Thinking 内容、表格行、噪声
+
+---
+
+## 22. 后续分步实施计划
+
+### 22.1 规划
+
+| 步骤 | 内容 | 状态 |
+|------|------|------|
+| **S1** | 修复导航目标：非 topic 条目跳到 agent 卡片而非 user 气泡 | ✅ 已完成 |
+| **S2** | `IndexItem` 加 `childIndex` 字段，parser 记录条目在卡片内的序号 | ⏳ 进行中 |
+| **S3** | 研究 SDK agent 卡片的 DOM 结构，确定工具/代码/结论的具体 DOM 元素选择器 | ⬜ 待定 |
+| **S4** | 实现精确 DOM 定位导航：用 `childIndex` 在 agent 卡片内找到第 N 个匹配元素 | ⬜ 待定 |
+| **S5** | 结论 parser 针对性过滤：排除 Thinking 段、表格行、合理聚合 | ⬜ 待定 |
+
+### 22.2 S2 详情
+
+在 `IndexItem` 中新增 `childIndex: number` 字段，记录该条目在其所属 card 中是第几个同类型元素（从 0 开始）。
+
+```
+toolCallParser:
+  - 同一个 assistant card 中，第 1 个 tool_use → childIndex = 0
+  - 第 2 个 tool_use → childIndex = 1
+
+codeBlockParser:
+  - 同一个 assistant card 中，第 1 个代码块 → childIndex = 0
+  - 第 2 个代码块 → childIndex = 1
+
+conclusionParser:
+  - 同一个 assistant card 中，第 1 个结论 → childIndex = 0
+  - 第 2 个结论 → childIndex = 1
+```
+
+此字段为 S3/S4 的精确 DOM 定位做准备，当前暂不影响导航行为。
+

@@ -34,31 +34,69 @@ export function extractToolCalls(messages: QPMessage[]): IndexItem[] {
   const items: IndexItem[] = [];
   let cardIdx = 0;
   let prevWasUser = true;
+  let prevCardIdx = -1;
+  let childIdx = 0;
 
   for (const msg of messages) {
     if (msg.role === "user") {
       if (!prevWasUser) cardIdx++;
       prevWasUser = true;
     } else {
-      if (prevWasUser) cardIdx++;
+      if (prevWasUser) {
+        cardIdx++;
+        childIdx = 0;  // Reset child index for new card
+        prevCardIdx = cardIdx;
+      }
       prevWasUser = false;
 
       if (Array.isArray(msg.content)) {
-        const blocks = msg.content as QPContentBlock[];
+        const blocks = msg.content as any[];
 
-        // First pass: tool_use blocks
         for (const block of blocks) {
-          if (block.type === "tool_use" && block.name) {
-            const inputSummary = summarizeInput(block.input);
-            const title = inputSummary
-              ? block.name + " → " + inputSummary
-              : block.name;
+          if (block.type === "text") continue;
 
+          let toolName = "";
+          let toolSummary = "";
+
+          if (block.type === "data" && block.data) {
+            // QwenPaw data blocks: data is an object with name/arguments
+            const info = typeof block.data === "string" ? (() => { try { return JSON.parse(block.data); } catch { return null; } })() : block.data;
+            if (info) {
+              toolName = info.name || "";
+              const args = info.arguments || info.input || {};
+              if (typeof args === "object") {
+                const keys = Object.keys(args);
+                if (keys.length > 0) {
+                  const val = args[keys[0]];
+                  toolSummary = typeof val === "string" ? smartTruncate(val, 15) : keys[0];
+                }
+              }
+            }
+          } else if (block.type === "file") {
+            toolName = "read_file";
+            toolSummary = block.filename
+              ? block.filename.replace(/\\/g, "/").split("/").pop() || ""
+              : "";
+          } else if (block.name) {
+            // Standard format: tool_use / tool_call
+            toolName = block.name;
+            if (block.input) {
+              const keys = Object.keys(block.input);
+              if (keys.length > 0) {
+                const val = block.input[keys[0]];
+                toolSummary = typeof val === "string" ? smartTruncate(val, 15) : keys[0];
+              }
+            }
+          }
+
+          if (toolName) {
+            const title = toolSummary ? toolName + " → " + toolSummary : toolName;
             items.push({
               id: "tool-" + items.length,
               group: "tool",
               title: smartTruncate(title, 35),
               bubbleIndex: cardIdx,
+              childIndex: childIdx++,
               timestamp: "",
               status: "success",
             });

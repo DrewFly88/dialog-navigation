@@ -26,6 +26,8 @@ export interface IndexItem {
   title: string;
   /** Sequential DOM bubble index (consecutive assistant msgs share one bubble) */
   bubbleIndex: number;
+  /** Position of this item among same-type items within the same card (0 = first) */
+  childIndex: number;
   timestamp: string;
   status?: 'success' | 'fail';
   lang?: string;
@@ -74,7 +76,7 @@ export interface QPMessage {
 }
 
 export interface QPContentBlock {
-  type: 'text' | 'tool_use' | 'tool_result' | 'image';
+  type: 'text' | 'tool_use' | 'tool_call' | 'tool_result' | 'data' | 'file' | 'image';
   text?: string;
   name?: string;
   input?: Record<string, unknown>;
