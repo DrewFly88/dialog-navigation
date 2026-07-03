@@ -186,15 +186,23 @@ try {
                 target = getTarget();
 
                 if (!target) {
+                  // SDK paginates PAGE_SIZE=10 cards per loadMore trigger.
+                  // A long session can have up to tc cards (tc up to ~80+),
+                  // requiring up to ~8 successful loads from an initial 10.
+                  // Allow more attempts (20) to cover re-fetch overhead and
+                  // SDK throttling, and only give up after consecutive stalled
+                  // rounds (not a single one) — a momentary stall can happen
+                  // when the SDK re-fetches session state mid-loop.
                   let prevCount = Array.from(bubbleList.children).filter(
                     (el) => el.classList.contains("qwenpaw-bubble-start") ||
                             el.classList.contains("qwenpaw-bubble-end")
                   ).length;
-                  for (let attempt = 0; attempt < 8; attempt++) {
+                  let stallCount = 0;
+                  for (let attempt = 0; attempt < 20; attempt++) {
                     const loadMore = bubbleList.querySelector(
                       ".qwenpaw-bubble-list-load-more"
                     ) as HTMLElement | null;
-                    if (!loadMore) break;
+                    if (!loadMore) break; // all history loaded
                     loadMore.scrollIntoView({ block: "start" });
                     await new Promise((r) => setTimeout(r, 800));
                     target = getTarget();
@@ -206,7 +214,17 @@ try {
                       (el) => el.classList.contains("qwenpaw-bubble-start") ||
                               el.classList.contains("qwenpaw-bubble-end")
                     ).length;
-                    if (newCount === prevCount) break;
+                    if (newCount === prevCount) {
+                      stallCount++;
+                      // Consecutive 3 stalls with loadMore still present
+                      // means SDK is not yielding more cards — give up.
+                      if (stallCount >= 3) {
+                        console.warn(LOG, `loadMore stalled 3x consecutively, giving up at attempt ${attempt+1}`);
+                        break;
+                      }
+                    } else {
+                      stallCount = 0;
+                    }
                     prevCount = newCount;
                   }
                 }

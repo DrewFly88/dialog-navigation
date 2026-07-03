@@ -59,7 +59,14 @@ export function useViewportTracker(
       container.querySelector(".qwenpaw-bubble-list") || container;
     const containerRect = bubbleList.getBoundingClientRect();
     const containerTop = containerRect.top;
-    const targetLine = containerTop + containerRect.height / 3;
+    // targetLine for cards: 1/3 from top (cards are tall, this picks the
+    // card occupying the upper-third reading position).
+    const cardTargetLine = containerTop + containerRect.height / 3;
+    // For tool calls (small elements stacked inside a card), use the
+    // VERTICAL CENTER of the visible viewport instead — this tracks the
+    // tool the user is actually looking at, rather than always picking
+    // the topmost tool near the 1/3 line.
+    const viewportCenter = containerTop + containerRect.height / 2;
 
     // 1. Find closest agent card (gives activeBubbleIndex, same as before)
     const visibleCards = visibleCardsRef.current;
@@ -69,7 +76,7 @@ export function useViewportTracker(
     for (const [el, agentDomPos] of visibleCards) {
       if (agentDomPos < 0) continue;
       const rect = el.getBoundingClientRect();
-      const dist = Math.abs(rect.top - targetLine);
+      const dist = Math.abs(rect.top - cardTargetLine);
       if (dist < closestAgentDist) {
         closestAgentDist = dist;
         closestAgentIdx = tc - 1 - agentDomPos;
@@ -78,17 +85,26 @@ export function useViewportTracker(
 
     setActiveBubbleIndex((prev) => (closestAgentIdx !== prev ? closestAgentIdx : prev));
 
-    // 2. Find closest tool call within the closest agent card
+    // 2. Find closest tool call to the viewport center.
+    // Only consider tools whose rect.top is within the visible viewport
+    // (excluding IntersectionObserver's 150px rootMargin overhang, which
+    // can report stale layout for content-visibility:auto placeholders).
     const visibleToolCalls = visibleToolCallsRef.current;
     let closestToolChildIdx = -1;
     let closestToolDist = Infinity;
+    const viewportTop = containerTop;
+    const viewportBottom = containerTop + containerRect.height;
 
     for (const [el, info] of visibleToolCalls) {
       // Only consider tool calls in the closest agent card (or its neighbors)
       const toolAgentIdx = tc - 1 - info.agentPos;
       if (Math.abs(toolAgentIdx - closestAgentIdx) > 1) continue; // skip far cards
       const rect = el.getBoundingClientRect();
-      const dist = Math.abs(rect.top - targetLine);
+      // Skip elements with stale/zero layout (content-visibility:auto
+      // placeholders report rect.top = 0 or far outside the viewport).
+      if (rect.top === 0 && rect.height === 0) continue;
+      if (rect.top < viewportTop - 50 || rect.top > viewportBottom + 50) continue;
+      const dist = Math.abs(rect.top - viewportCenter);
       if (dist < closestToolDist) {
         closestToolDist = dist;
         closestToolChildIdx = info.childIdx;
@@ -112,6 +128,13 @@ export function useViewportTracker(
     const isUserBubble = (el: Element) =>
       el.classList.contains("qwenpaw-bubble-end");
 
+    // A tool call element is a <details> whose class contains "toolCallCompact".
+    // Note: the nested <summary> also matches the substring, so we require
+    // tagName === "DETAILS" to exclude it (see computeToolChildIdx note).
+    const isToolCall = (el: Element): boolean =>
+      el.tagName === "DETAILS" &&
+      Array.from(el.classList).some(c => c.includes("toolCallCompact"));
+
     const computeAgentDomPos = (el: Element): number => {
       const allChildren = Array.from(bubbleList.children);
       return allChildren.indexOf(el) - 1;
@@ -123,7 +146,11 @@ export function useViewportTracker(
       if (!card) return null;
       const agentPos = computeAgentDomPos(card);
       if (agentPos < 0) return null;
-      const siblings = card.querySelectorAll('[class*="toolCallCompact"]');
+      // Match only the DETAILS container (class contains "toolCallCompact__"),
+      // NOT the nested SUMMARY (class contains "toolCallCompactSummary__").
+      // Using a substring match on "toolCallCompact" alone catches both, which
+      // doubles the element count and misaligns childIdx vs parser's call_id-deduped index.
+      const siblings = card.querySelectorAll('details[class*="toolCallCompact"]');
       let childIdx = -1;
       for (let i = 0; i < siblings.length; i++) {
         if (siblings[i] === toolEl) { childIdx = i; break; }
@@ -144,8 +171,10 @@ export function useViewportTracker(
               }
             } else if (isUserBubble(el)) {
               visibleCardsRef.current.set(el, -1);
-            } else if (el.classList.contains('qwenpaw-bubble')) {
-              // Tool call element
+            } else if (isToolCall(el)) {
+              // Tool call <details> element inside an agent card.
+              // NOTE: previously this branch checked `el.classList.contains('qwenpaw-bubble')`,
+              // which never matched toolCallCompact elements → activeToolIndex stuck at -1.
               const info = computeToolChildIdx(el);
               if (info) {
                 visibleToolCallsRef.current.set(el, info);
@@ -168,10 +197,11 @@ export function useViewportTracker(
           obs.observe(child);
         }
       }
-      // Also observe existing tool call elements inside agent cards
+      // Also observe existing tool call elements inside agent cards.
+      // Use details[class*=...] to exclude the nested SUMMARY (see computeToolChildIdx note).
       const cards = bubbleList.querySelectorAll('.qwenpaw-bubble-start');
       cards.forEach((card) => {
-        card.querySelectorAll('[class*="toolCallCompact"]').forEach((toolEl) => {
+        card.querySelectorAll('details[class*="toolCallCompact"]').forEach((toolEl) => {
           obs.observe(toolEl);
         });
       });
@@ -187,8 +217,9 @@ export function useViewportTracker(
             if (isAgentCard(node) || isUserBubble(node)) {
               obs.observe(node);
             }
-            // Observe tool calls inside added nodes
-            node.querySelectorAll('[class*="toolCallCompact"]').forEach((toolEl) => {
+            // Observe tool calls inside added nodes.
+            // Use details[class*=...] to exclude the nested SUMMARY.
+            node.querySelectorAll('details[class*="toolCallCompact"]').forEach((toolEl) => {
               obs.observe(toolEl);
             });
           }
@@ -210,17 +241,33 @@ export function useViewportTracker(
     }
     if (!scrollTarget) scrollTarget = bubbleList;
 
+    // After a scroll, content-visibility:auto cards may re-render
+    // asynchronously across several frames, so a single rAF reads stale
+    // rects. Schedule follow-up calculations at increasing delays to
+    // converge on the settled layout.
+    const settleTimers: ReturnType<typeof setTimeout>[] = [];
     const handleScroll = () => {
       if (rafRef.current) cancelAnimationFrame(rafRef.current);
       rafRef.current = requestAnimationFrame(calculate);
+      // Clear any pending settle timers from a previous scroll burst.
+      while (settleTimers.length) clearTimeout(settleTimers.pop()!);
+      // Multi-phase recalculation: 120ms, 300ms, 600ms after scroll.
+      // Each phase re-measures with progressively more-settled layout.
+      for (const delay of [120, 300, 600]) {
+        settleTimers.push(setTimeout(() => {
+          if (rafRef.current) cancelAnimationFrame(rafRef.current);
+          rafRef.current = requestAnimationFrame(calculate);
+        }, delay));
+      }
     };
 
-    scrollTarget.addEventListener("scroll", handleScroll, { passive: true });
+    scrollTarget!.addEventListener("scroll", handleScroll, { passive: true });
     setTimeout(() => handleScroll(), 50);
 
     return () => {
       scrollTarget!.removeEventListener("scroll", handleScroll);
       if (rafRef.current) cancelAnimationFrame(rafRef.current);
+      while (settleTimers.length) clearTimeout(settleTimers.pop()!);
       observerRef.current?.disconnect();
       observerRef.current = null;
       mutObserver.disconnect();

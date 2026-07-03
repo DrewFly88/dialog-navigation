@@ -1244,3 +1244,110 @@ conclusionParser:
 | 代码分组内容验证 | ⬜ | 确认 codeBlockParser 提取正确性 |
 | 导航后高亮保持优化 | ⬜ | 可能是视口追踪的延迟导致的 |
 
+---
+
+## 25. 工具分组视口追踪高亮不准根因分析（2026-07-03）
+
+### 25.1 现象
+
+工具分组下，即使全部消息已加载，滚动到某个工具调用时 BarStrip 高亮的条目与实际可见工具不一致，或高亮错位、或完全失效（`activeToolIndex` 始终为 -1）。
+
+### 25.2 根因（共 5 个，层层叠加）
+
+| # | 根因 | 位置 | 影响 |
+|---|------|------|------|
+| **1** | `[class*="toolCallCompact"]` 子字符串选择器同时匹配 `<details class="toolCallCompact__X">` 和内嵌 `<summary class="toolCallCompactSummary__Y">` | `useViewportTracker.ts` 3 处 querySelectorAll | DOM 元素数 = parser 去重后数的 **2 倍**，childIdx 系统性错位 |
+| **2** | IntersectionObserver 回调用 `el.classList.contains('qwenpaw-bubble')` 判断工具元素，但工具元素 class 是 `toolCards-module__toolCallCompact`，不含 `qwenpaw-bubble` | `useViewportTracker.ts` observer 回调 | 工具元素**永远不被识别**，`visibleToolCallsRef` 始终为空，`activeToolIndex` 永远 -1 |
+| **3** | `calculate()` 用容器 1/3 处（`cardTargetLine`）找最近工具，但工具是小元素从卡片顶部依次向下排列，1/3 线总落在第一个工具附近 | `useViewportTracker.ts` calculate 第 2 段 | 永远高亮卡片顶部工具，非用户关注的中部工具 |
+| **4** | `scrollIntoView` 后 `calculate()` 在 content-visibility 布局稳定前执行，`getBoundingClientRect()` 返回过时 rect | `useViewportTracker.ts` handleScroll | 首次滚动高亮错位，需二次触发才正确 |
+| **5** | `content-visibility: auto` 使 `scrollIntoView({block:'center'})` 后目标不一定真在视口中心（布局异步重排） | SDK 渲染机制（非插件 bug） | 单纯延迟重算无法根除，属固有约束 |
+
+### 25.3 修复
+
+| 根因 | 修复 |
+|------|------|
+| 1 | 选择器改为 `details[class*="toolCallCompact"]`（tagName DETAILS 排除 SUMMARY） |
+| 2 | 新增 `isToolCall()` 辅助函数（tagName=DETAILS 且 class 含 toolCallCompact），替换错误的 `qwenpaw-bubble` 判断 |
+| 3 | 工具追踪改用视口中心 `viewportCenter`（容器 1/2 处），卡片追踪仍用 1/3 处；过滤 rect.top 在视口外的元素 |
+| 4 | scroll 后多阶段重算：rAF + 120ms + 300ms + 600ms 四次 calculate，收敛到布局稳定后的值 |
+
+根因 5 属 SDK 渲染固有约束，未修复——多阶段重算已将准确率从 0% 提升到约 50-60%，剩余偏差来自 content-visibility 与 scrollIntoView 的时序冲突，进一步优化收益递减。
+
+### 25.4 修改文件
+
+| 文件 | 变更 |
+|------|------|
+| `src/hooks/useViewportTracker.ts` | 选择器排除 SUMMARY；新增 isToolCall；observer 回调修复工具识别；calculate 区分 cardTargetLine/viewportCenter + 过滤异常 rect；handleScroll 多阶段重算 |
+
+### 25.5 构建产物
+
+```
+dist/index.js  47.15 KB  (gzip: 13.19 kB)
+```
+
+---
+
+## 26. 远距离跳转加载失败修复（2026-07-04）
+
+### 26.1 现象
+
+从最新条目跳转到最早话题（或任何远距离条目）时，DOM 卡片只加载一部分就停止，跳转目标无法到达。
+
+### 26.2 根因
+
+`navigateToMessage` 中的 loadMore 循环（`src/index.tsx`）有两处缺陷：
+
+| # | 缺陷 | 原代码 | 影响 |
+|---|------|--------|------|
+| **1** | 循环上限 8 次不够 | `for (let attempt = 0; attempt < 8; attempt++)` | SDK 每次加载 10 张（PAGE_SIZE=10），从初始 10 张加载到 78 张需 ~7 次成功加载；遇 re-fetch 节流导致某次无增长时，8 次循环不够用 |
+| **2** | 单次卡片数不增长就 break | `if (newCount === prevCount) break;` | SDK 在循环中途 re-fetch session 状态时，某次 loadMore 可能瞬时无新增卡片，但下次又恢复——单次停滞就退出导致"加载到一半停止" |
+
+### 26.3 修复
+
+```javascript
+// 循环上限 8 → 20，覆盖 re-fetch 开销和 SDK 节流
+for (let attempt = 0; attempt < 20; attempt++) {
+  // ...
+  if (newCount === prevCount) {
+    stallCount++;
+    // 连续 3 次停滞才退出，容忍瞬时 re-fetch 干扰
+    if (stallCount >= 3) break;
+  } else {
+    stallCount = 0;
+  }
+  prevCount = newCount;
+}
+```
+
+- 循环上限 `8 → 20`：覆盖长会话（80+ 卡片）和 SDK re-fetch 开销
+- 提前退出条件 `单次停滞 → 连续 3 次停滞`：容忍 SDK 瞬时节流，仅在确认无法再加载时放弃
+
+### 26.4 验证
+
+真实长会话（879 条消息、78 张卡片），初始 DOM 10 张，点击最早 `topic-0`：
+
+| 时间 | DOM 卡片数 | loadMore |
+|------|:---------:|:--------:|
+| 0s | 10 | 存在 |
+| 1s | 30 | 存在 |
+| 2s | 40 | 存在 |
+| 3s | 50 | 存在 |
+| 4s | 60 | 存在 |
+| 5s | 70 | 存在 |
+| 6s | **78** | **消失** ✅ |
+| 7s+ | 78 稳定 | 消失 |
+
+总加载耗时 ~6s，从 10 张平滑加载到全量 78 张，跳转目标成功到达视口顶部。
+
+### 26.5 修改文件
+
+| 文件 | 变更 |
+|------|------|
+| `src/index.tsx` | loadMore 循环上限 8→20；单次停滞退出改为连续 3 次停滞退出 |
+
+### 26.6 构建产物
+
+```
+dist/index.js  47.40 KB  (gzip: 13.26 kB)
+```
+
