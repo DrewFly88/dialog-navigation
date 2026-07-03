@@ -405,6 +405,21 @@ export function BarStrip({
             {secondaryItem.lang && ` · ${secondaryItem.lang}`}
             {secondaryItem.status && ` · ${secondaryItem.status === "fail" ? "失败" : "成功"}`}
           </div>
+          {secondaryItem.group === "tool" && (function() {
+            try {
+              var tc = indexData.stats.totalCards;
+              var idx = tc - secondaryItem.bubbleIndex;
+              var bl = document.querySelector(".qwenpaw-bubble-list");
+              if (!bl) return null;
+              var card = bl.children[idx];
+              if (!card) return null;
+              var els = card.querySelectorAll('[class*="toolCallLabel"]');
+              var lab = els[secondaryItem.childIndex];
+              var txt = lab ? lab.textContent.trim() : null;
+              if (!txt) return null;
+              return React.createElement("div", { style: { fontSize: 11, color: mutedColor, marginTop: 2 } }, txt);
+            } catch(e) { return null; }
+          })()}
         </div>,
         document.body
       )}

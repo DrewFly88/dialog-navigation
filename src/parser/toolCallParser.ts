@@ -36,6 +36,8 @@ export function extractToolCalls(messages: QPMessage[]): IndexItem[] {
   let prevWasUser = true;
   let prevCardIdx = -1;
   let childIdx = 0;
+  // Track seen call_ids to deduplicate
+  const seenCallIds = new Set<string>();
 
   for (const msg of messages) {
     if (msg.role === "user") {
@@ -70,6 +72,12 @@ export function extractToolCalls(messages: QPMessage[]): IndexItem[] {
                   const val = args[keys[0]];
                   toolSummary = typeof val === "string" ? smartTruncate(val, 15) : keys[0];
                 }
+              }
+              // Deduplicate by call_id (stream deltas duplicate the same call)
+              const callId = info.call_id;
+              if (callId) {
+                if (seenCallIds.has(callId)) continue;
+                seenCallIds.add(callId);
               }
             }
           } else if (block.type === "file") {

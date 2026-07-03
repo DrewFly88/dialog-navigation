@@ -1,0 +1,3 @@
+- 使用 qwenpaw-guide 技能掌握 Qwenpaw 的使用方法
+- 使用 qwenpaw-codebase 技能了解 Qwenpaw 源码
+- 使用 qwenpaw-plugin-testing 自动执行 Qwenpaw 前端插件测试与调试
