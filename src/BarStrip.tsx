@@ -382,20 +382,22 @@ export function BarStrip({
       </div>
 
       {secondaryItem && hovered && createPortal(
-        <div
-          style={{
-            position: "fixed",
-            right: secondaryRight,
-            top: secondaryTop,
-            background: theme === "dark" ? "rgba(40,40,40,0.96)" : "rgba(255,255,255,0.98)",
-            color: textColor,
-            borderRadius: 6,
-            padding: "6px 10px",
-            boxShadow: "0 2px 10px rgba(0,0,0,0.15)",
-            whiteSpace: "nowrap",
-            zIndex: 10002,
-            pointerEvents: "none",
-          }}
+      <div
+        style={{
+          position: "fixed",
+          right: secondaryRight,
+          top: secondaryTop,
+          background: theme === "dark" ? "rgba(40,40,40,0.96)" : "rgba(255,255,255,0.98)",
+          color: textColor,
+          borderRadius: 6,
+          padding: "8px 12px",
+          boxShadow: "0 4px 16px rgba(0,0,0,0.18)",
+          whiteSpace: "pre-wrap",
+          maxWidth: 320,
+          zIndex: 10002,
+          pointerEvents: "none",
+          lineHeight: 1.5,
+        }}
         >
           <div style={{ fontSize: 13, fontWeight: 500 }}>
             {secondaryItem.title}
@@ -417,7 +419,7 @@ export function BarStrip({
               var lab = els[secondaryItem.childIndex];
               var txt = lab ? lab.textContent.trim() : null;
               if (!txt) return null;
-              return React.createElement("div", { style: { fontSize: 11, color: mutedColor, marginTop: 2 } }, txt);
+              return React.createElement("div", { style: { fontSize: 11, color: mutedColor, marginTop: 3, whiteSpace: "pre-wrap", wordBreak: "break-word" } }, txt);
             } catch(e) { return null; }
           })()}
         </div>,
