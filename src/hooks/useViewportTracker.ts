@@ -25,18 +25,23 @@ export function useViewportTracker(
   chatContainerRef: React.RefObject<HTMLElement | null>,
   totalCards: number,
   containerReady?: boolean
-) {
+): number[] {
   const [activeBubbleIndex, setActiveBubbleIndex] = useState<number>(-1);
+  // activeToolIndex: childIndex of the visible tool call (-1 = none / topic)
+  const [activeToolIndex, setActiveToolIndex] = useState<number>(-1);
   const rafRef = useRef<number>(0);
   const lastCalcRef = useRef<number>(0);
   const totalCardsRef = useRef(totalCards);
+  const totalCardsRef2 = useRef(totalCards);
 
-  // IntersectionObserver tracks which cards are visible + their agentPos
+  // IntersectionObserver tracks which cards/tool calls are visible
   const visibleCardsRef = useRef<Map<Element, number>>(new Map());
+  const visibleToolCallsRef = useRef<Map<Element, { agentPos: number; childIdx: number }>>(new Map());
   const observerRef = useRef<IntersectionObserver | null>(null);
 
   useEffect(() => {
     totalCardsRef.current = totalCards;
+    totalCardsRef2.current = totalCards;
   }, [totalCards]);
 
   const calculate = useCallback(() => {
@@ -52,40 +57,45 @@ export function useViewportTracker(
 
     const bubbleList =
       container.querySelector(".qwenpaw-bubble-list") || container;
-
-    // Use parser's totalCards for stable indices regardless of loaded card count.
-    // Agent card at DOM position k (0 = newest, after spacer) has
-    // parserIdx = tc - 1 - k.
-    const visibleCards = visibleCardsRef.current;
-    if (visibleCards.size === 0) {
-      setActiveBubbleIndex(-1);
-      return;
-    }
-
     const containerRect = bubbleList.getBoundingClientRect();
     const containerTop = containerRect.top;
-    // Use 1/3 line as the "reading position" target
     const targetLine = containerTop + containerRect.height / 3;
 
-    let closestIdx = -1;
-    let closestDist = Infinity;
+    // 1. Find closest agent card (gives activeBubbleIndex, same as before)
+    const visibleCards = visibleCardsRef.current;
+    let closestAgentIdx = -1;
+    let closestAgentDist = Infinity;
 
-    // Only measure agent cards (skip user bubbles with agentDomPos === -1)
     for (const [el, agentDomPos] of visibleCards) {
-      if (agentDomPos < 0) continue; // skip user bubbles
-
+      if (agentDomPos < 0) continue;
       const rect = el.getBoundingClientRect();
-      const elTop = rect.top;
-      const dist = Math.abs(elTop - targetLine);
-
-      if (dist < closestDist) {
-        closestDist = dist;
-        // Formula: agentDomPos=0 (newest, first after spacer) = highest parserIdx
-        closestIdx = tc - 1 - agentDomPos;
+      const dist = Math.abs(rect.top - targetLine);
+      if (dist < closestAgentDist) {
+        closestAgentDist = dist;
+        closestAgentIdx = tc - 1 - agentDomPos;
       }
     }
 
-    setActiveBubbleIndex((prev) => (closestIdx !== prev ? closestIdx : prev));
+    setActiveBubbleIndex((prev) => (closestAgentIdx !== prev ? closestAgentIdx : prev));
+
+    // 2. Find closest tool call within the closest agent card
+    const visibleToolCalls = visibleToolCallsRef.current;
+    let closestToolChildIdx = -1;
+    let closestToolDist = Infinity;
+
+    for (const [el, info] of visibleToolCalls) {
+      // Only consider tool calls in the closest agent card (or its neighbors)
+      const toolAgentIdx = tc - 1 - info.agentPos;
+      if (Math.abs(toolAgentIdx - closestAgentIdx) > 1) continue; // skip far cards
+      const rect = el.getBoundingClientRect();
+      const dist = Math.abs(rect.top - targetLine);
+      if (dist < closestToolDist) {
+        closestToolDist = dist;
+        closestToolChildIdx = info.childIdx;
+      }
+    }
+
+    setActiveToolIndex((prev) => (closestToolChildIdx !== prev ? closestToolChildIdx : prev));
   }, [chatContainerRef]);
 
   // Set up IntersectionObserver + scroll listener + MutationObserver
@@ -102,12 +112,24 @@ export function useViewportTracker(
     const isUserBubble = (el: Element) =>
       el.classList.contains("qwenpaw-bubble-end");
 
-    // computeAgentDomPos: element's position among all bubbleList children,
-    // minus 1 to skip the spacer element at position 0.
-    // This gives a stable position: 0 = newest agent, increasing toward oldest.
     const computeAgentDomPos = (el: Element): number => {
       const allChildren = Array.from(bubbleList.children);
-      return allChildren.indexOf(el) - 1; // -1 for spacer
+      return allChildren.indexOf(el) - 1;
+    };
+
+    // Compute tool call's childIndex within its parent card
+    const computeToolChildIdx = (toolEl: Element): { agentPos: number; childIdx: number } | null => {
+      const card = toolEl.closest('.qwenpaw-bubble-start');
+      if (!card) return null;
+      const agentPos = computeAgentDomPos(card);
+      if (agentPos < 0) return null;
+      const siblings = card.querySelectorAll('[class*="toolCallCompact"]');
+      let childIdx = -1;
+      for (let i = 0; i < siblings.length; i++) {
+        if (siblings[i] === toolEl) { childIdx = i; break; }
+      }
+      if (childIdx < 0) return null;
+      return { agentPos, childIdx };
     };
 
     observerRef.current = new IntersectionObserver(
@@ -121,22 +143,23 @@ export function useViewportTracker(
                 visibleCardsRef.current.set(el, agentDomPos);
               }
             } else if (isUserBubble(el)) {
-              // Track user bubbles with -1 so calculate() can skip them
               visibleCardsRef.current.set(el, -1);
+            } else if (el.classList.contains('qwenpaw-bubble')) {
+              // Tool call element
+              const info = computeToolChildIdx(el);
+              if (info) {
+                visibleToolCallsRef.current.set(el, info);
+              }
             }
           } else {
             visibleCardsRef.current.delete(el);
+            visibleToolCallsRef.current.delete(el);
           }
         }
       },
-      {
-        root: bubbleList,
-        rootMargin: "150px 0px", // buffer zone for smoother transitions
-        threshold: 0,
-      }
+      { root: bubbleList, rootMargin: "150px 0px", threshold: 0 }
     );
 
-    // Observe all current card children (both agent cards and user bubbles)
     const observeCards = () => {
       const obs = observerRef.current;
       if (!obs) return;
@@ -145,38 +168,44 @@ export function useViewportTracker(
           obs.observe(child);
         }
       }
+      // Also observe existing tool call elements inside agent cards
+      const cards = bubbleList.querySelectorAll('.qwenpaw-bubble-start');
+      cards.forEach((card) => {
+        card.querySelectorAll('[class*="toolCallCompact"]').forEach((toolEl) => {
+          obs.observe(toolEl);
+        });
+      });
     };
     observeCards();
 
-    // MutationObserver: observe new cards as they're added
     const mutObserver = new MutationObserver((mutations) => {
       const obs = observerRef.current;
       if (!obs) return;
       for (const mutation of mutations) {
         for (const node of mutation.addedNodes) {
-          if (
-            node instanceof Element &&
-            (isAgentCard(node) || isUserBubble(node))
-          ) {
-            obs.observe(node);
+          if (node instanceof Element) {
+            if (isAgentCard(node) || isUserBubble(node)) {
+              obs.observe(node);
+            }
+            // Observe tool calls inside added nodes
+            node.querySelectorAll('[class*="toolCallCompact"]').forEach((toolEl) => {
+              obs.observe(toolEl);
+            });
           }
         }
-        // Clean up removed cards from visible set
         for (const node of mutation.removedNodes) {
           if (node instanceof Element) {
             visibleCardsRef.current.delete(node);
+            visibleToolCallsRef.current.delete(node);
           }
         }
       }
     });
-    mutObserver.observe(bubbleList, { childList: true });
+    mutObserver.observe(bubbleList, { childList: true, subtree: true });
 
     // --- Scroll listener ---
     let scrollTarget: HTMLElement | null = bubbleList;
-    while (
-      scrollTarget &&
-      scrollTarget.scrollHeight <= scrollTarget.clientHeight
-    ) {
+    while (scrollTarget && scrollTarget.scrollHeight <= scrollTarget.clientHeight) {
       scrollTarget = scrollTarget.parentElement;
     }
     if (!scrollTarget) scrollTarget = bubbleList;
@@ -187,7 +216,6 @@ export function useViewportTracker(
     };
 
     scrollTarget.addEventListener("scroll", handleScroll, { passive: true });
-    // Initial calculation (slight delay to let IntersectionObserver populate)
     setTimeout(() => handleScroll(), 50);
 
     return () => {
@@ -197,8 +225,9 @@ export function useViewportTracker(
       observerRef.current = null;
       mutObserver.disconnect();
       visibleCardsRef.current.clear();
+      visibleToolCallsRef.current.clear();
     };
   }, [chatContainerRef, calculate, containerReady]);
 
-  return activeBubbleIndex;
+  return [activeBubbleIndex, activeToolIndex];
 }

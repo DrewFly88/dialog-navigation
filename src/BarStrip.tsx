@@ -14,8 +14,9 @@ import { StatsBubble } from "./StatsBubble";
 interface BarStripProps {
   indexData: IndexData;
   activeBubbleIndex: number;
+  activeToolIndex: number;
   theme: ThemeType;
-  onNavigate: (bubbleIndex: number, childIndex: number, group: IndexGroup) => void;
+  onNavigate: (bubbleIndex: number, childIndex: number, group: IndexGroup, itemId?: string) => void;
   isLoading?: boolean;
 }
 
@@ -41,6 +42,7 @@ function hexToRgb(hex: string): string {
 export function BarStrip({
   indexData,
   activeBubbleIndex,
+  activeToolIndex,
   theme,
   onNavigate,
   isLoading = false,
@@ -96,20 +98,31 @@ export function BarStrip({
 
   const currentItems = indexData[activeGroup] || [];
 
-  // Find the "active" item: the one with the largest bubbleIndex ≤ activeBubbleIndex.
-  // This gives "currently reading this section" highlight behavior.
+  // Find the "active" item: for topic groups, the one with the largest
+  // bubbleIndex ≤ activeBubbleIndex. For tool groups, also match childIndex
+  // against activeToolIndex for precise tool call tracking.
   const activeItemId = useMemo(() => {
     if (activeBubbleIndex < 0 || currentItems.length === 0) return null;
     let best: IndexItem | null = null;
+
     for (const item of currentItems) {
-      if (item.bubbleIndex <= activeBubbleIndex) {
-        if (!best || item.bubbleIndex > best.bubbleIndex) {
+      // For tool group, require exact bubbleIndex AND childIndex match
+      if (activeGroup === 'tool' && activeToolIndex >= 0) {
+        if (item.bubbleIndex === activeBubbleIndex && item.childIndex === activeToolIndex) {
           best = item;
+          break; // exact match found
+        }
+      } else {
+        // Default: largest bubbleIndex ≤ activeBubbleIndex
+        if (item.bubbleIndex <= activeBubbleIndex) {
+          if (!best || item.bubbleIndex > best.bubbleIndex) {
+            best = item;
+          }
         }
       }
     }
     return best?.id ?? null;
-  }, [activeBubbleIndex, currentItems]);
+  }, [activeBubbleIndex, activeToolIndex, currentItems, activeGroup]);
 
   // Auto-scroll the bar strip to show the active item
   useEffect(() => {
@@ -329,7 +342,7 @@ export function BarStrip({
                 onMouseEnter={() => setHoveredItemId(item.id)}
                 onMouseLeave={() => setHoveredItemId(null)}
                 onClick={() => {
-                  onNavigate(item.bubbleIndex, item.childIndex, item.group);
+                  onNavigate(item.bubbleIndex, item.childIndex, item.group, item.id);
                   setHovered(false);
                   setHoveredItemId(null);
                 }}
@@ -366,7 +379,7 @@ export function BarStrip({
                   alignSelf: "flex-end",
                 }}
                 onClick={() => {
-                  onNavigate(item.bubbleIndex, item.childIndex, item.group);
+                  onNavigate(item.bubbleIndex, item.childIndex, item.group, item.id);
                   setHovered(false);
                   setHoveredItemId(null);
                 }}

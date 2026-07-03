@@ -61,7 +61,7 @@ try {
         }, [refresh]);
 
         const { cardCount: _cc } = useMessageMap(chatContainerRef, debouncedRefresh, containerReady);
-        const activeBubbleIndex = useViewportTracker(chatContainerRef, totalCards, containerReady);
+        const [activeBubbleIndex, activeToolIndex] = useViewportTracker(chatContainerRef, totalCards, containerReady);
 
         // Navigation loading state — shows "对话加载中…" in BarStrip
         const [isNavigating, setIsNavigating] = useState(false);
@@ -145,7 +145,7 @@ try {
         // scroll to target. Fiber dispatch doesn't work because session
         // re-fetch (triggered by 500ms polling) resets the dispatched state.
         const navigateToMessage = useCallback(
-          async (parserIdx: number, childIndex?: number, group?: string) => {
+          async (parserIdx: number, childIndex?: number, group?: string, itemId?: string) => {
             const container = chatContainerRef.current;
             if (!container) return;
 
@@ -238,7 +238,7 @@ try {
               if (!isTopic && childIndex !== undefined && group && target) {
                 let selector = '';
                 if (group === 'tool') {
-                  selector = '[class*="toolCallCompact"]';
+                  selector = '[class*="toolCallLabel"]';
                 } else if (group === 'code') {
                   selector = 'pre code, [class*="toolCallCompact"] code';
                 } else if (group === 'conclusion') {
@@ -246,10 +246,28 @@ try {
                 }
                 if (selector) {
                   const candidates = target.querySelectorAll<HTMLElement>(selector);
-                  const precise = candidates[childIndex];
-                  if (precise) {
-                    precisionTarget = precise;
-                    console.log(LOG, `precision: ${group}[${childIndex}] found in card`);
+                  // For tools, deduplicate labels to match parser's call_id dedup
+                  if (group === 'tool') {
+                    const seen = new Set<string>();
+                    let matchIdx = 0;
+                    for (const el of candidates) {
+                      const txt = (el.textContent || '').trim();
+                      if (txt && !seen.has(txt)) {
+                        seen.add(txt);
+                        if (matchIdx === childIndex) {
+                          precisionTarget = el.closest('[class*="toolCallCompact"]') as HTMLElement || el;
+                          console.log(LOG, `precision: tool[${childIndex}] matched by unique label`);
+                          break;
+                        }
+                        matchIdx++;
+                      }
+                    }
+                  } else {
+                    const precise = candidates[childIndex];
+                    if (precise) {
+                      precisionTarget = precise;
+                      console.log(LOG, `precision: ${group}[${childIndex}] found`);
+                    }
                   }
                 }
               }
@@ -300,6 +318,7 @@ try {
               <BarStrip
                 indexData={indexData}
                 activeBubbleIndex={activeBubbleIndex}
+                activeToolIndex={activeToolIndex}
                 theme={theme}
                 onNavigate={navigateToMessage}
                 isLoading={isNavigating}

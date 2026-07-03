@@ -1200,3 +1200,47 @@ conclusionParser:
 
 此字段为 S3/S4 的精确 DOM 定位做准备，当前暂不影响导航行为。
 
+---
+
+## 24. 工具/代码/结论 分类实现总结（2026-07-03）
+
+### 24.1 最终分组定义
+
+| 分组 | 本质 | 数据来源 | 示例条目 |
+|------|------|---------|---------|
+| **话题** | 用户提问/话题节点 | 用户消息的 text | `帮我从html文件中...` |
+| **工具** | 代理执行的操作 | `data`/`file` 块中的 JSON（name+arguments） | `read_file`、`execute_shell_command` |
+| **代码** | 被执行的代码内容 | text 块 ``` + tool input 中的 `input.code` | `python - extract_refs()` |
+| **结论** | 回复中的关键结论 | text 块中的加粗/列表 | `找到 29 个引用标记` |
+
+### 24.2 已实现的功能
+
+| 功能 | 状态 | 说明 |
+|------|:----:|------|
+| API 数据解析 → 索引 | ✅ | 4 个 parser 从 API messages[] 提取 |
+| 分组切换（BarStrip） | ✅ | 循环切换 4 个分组 |
+| 视口追踪高亮 | ✅ | IntersectionObserver 追踪可见卡片 |
+| 精确工具追踪 | ✅ | 单独追踪每个 `toolCallCompact` 元素 |
+| 点击跳转 | ✅ | scrollIntoView 到具体 DOM 元素 |
+| 工具去重 | ✅ | 用 `call_id` 去重，48→24 |
+| 二级弹窗中文标签 | ✅ | 显示 DOM 中文描述（`阅读 filename`） |
+| 长文本换行 | ✅ | `pre-wrap` + `maxWidth 320px` |
+
+### 24.3 关键决策记录
+
+| 决策 | 方案 | 原因 |
+|------|------|------|
+| 导航公式 | `childrenIndex = totalCards - parserIdx` | SDK 从最新卡片向下加载，此公式正确映射 |
+| 加载触发 | scrollToLoadMore（不可用 fiber dispatch） | fiber dispatch 在 v1.1.12 中无效 |
+| 加载提示 | "对话加载中…" 显示在 BarStrip 顶部 | 用户感知加载状态 |
+| 工具高亮 | 精确到 `childIndex`（卡片内第 N 个工具） | 卡片有多个工具调用时需区分 |
+| 二级弹窗信息 | DOM 标签文本（如 `阅读 filename`） | 比 parser 提取的原始工具名更可读 |
+
+### 24.4 待完成
+
+| 任务 | 优先级 | 说明 |
+|------|:------:|------|
+| S5 — 结论 parser 过滤 | ⬜ | 排除 Thinking 段、表格行 |
+| 代码分组内容验证 | ⬜ | 确认 codeBlockParser 提取正确性 |
+| 导航后高亮保持优化 | ⬜ | 可能是视口追踪的延迟导致的 |
+
