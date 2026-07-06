@@ -1786,4 +1786,195 @@ const childrenIndex = isTopic
 dist/index.js  48.90 KB  (gzip: 14.04 kB)
 ```
 
+---
+
+## 30. 跳转公式回退 + conclusion 精准定位 C2 粛选（2026-07-06）
+
+### 30.1 起点：§29 误改的回退
+
+§29 把跳转公式改成 `sdkCardCount - 1 - parserIdx + agentDomPos * 2`（用 SDK agent card 总数 39），并误判根因是"parser 与 SDK 坐标系不一致"。本轮实测推翻此诊断：
+
+实测视口最居中卡片：`activeBi=77`，`vtPos=0`（DOM idx 0，最新卡），公式 `tc-1-vtPos = 78-1-0 = 77` ✅ 与 activeBi 完全一致。**视口追踪器一直是对的**，用 `tc=totalCards=78`，`agentDomPos=indexOf(el)-1`（DOM 全局 idx），反算 `bubbleIndex = tc-1-agentDomPos = tc-idx`，即 **`idx = tc - bubbleIndex`**。
+
+三项实测全对：
+- `bi=77`（newest）→ `idx = 78-77 = 1` ✅（idx 1 是首个 agent card）
+- `bi=73` → `idx = 78-73 = 5` ✅
+- `bi=5` → `idx = 78-5 = 73` ✅
+
+**真实根因**：§29 误改成 `sdkCardCount-1-parserIdx + agentDomPos*2` 完全错误。本轮回退正确公式 `childrenIndex = tc - parserIdx`（与视口追踪器同源）。
+
+### 30.2 实测：parser 与 SDK 坐标系是一致的
+
+§29 误判"parser cardIdx 有跳跃（SDK 合并多消息为单卡），坐标系不一致"。本轮实测推翻：
+
+- DOM 内 idx 5 卡片 `textContent` 含"完全不提文件名"（bi:73 对应内容）✅
+- 公式 `idx = tc - bubbleIndex` 三项实测全对
+
+**两坐标系是一致的**，没有跳跃。SDK 合并多消息为单卡渲染，但 parser cardIdx 也按"user 后首个 assistant 递增+1、后续 assistant 共享同卡片"规则算，与 SDK 渲染一致。
+
+### 30.3 修复一：跳转公式回退
+
+`src/index.tsx:navigateToMessage` 的公式回退：
+
+```typescript
+// §30: 跳转公式与视口追踪器（useViewportTracker）同源。
+// 视口追踪器实测正确: agentDomPos = indexOf(el) - 1
+//   → bubbleIndex = tc - 1 - agentDomPos = tc - 1 - (idx - 1) = tc - idx
+//   → idx = tc - bubbleIndex
+// 实测: bi=77(newest) → idx 1 ✅, bi=73 → idx 5 ✅, bi=5 → idx 73 ✅
+// §29 误改成 sdkCardCount-1-parserIdx + agentDomPos*2 完全错误,本轮回退。
+const isTopic = group === "topic";
+const childrenIndex = tc - parserIdx;
+```
+
+`isTopic` 保留 §29 的 `group === "topic"` 直判（不从奇偶性反推）。
+
+### 30.4 修复二：conclusion 精准定位 C2 粛选
+
+#### 30.4.1 根源
+
+`navigateToMessage` 第 283 行 conclusion 选择器 `strong, li` 抓全部加粗/列表（含非结论的"当前工作目录"等），与 parser `childIndex`（只数 C2 白名单命中的结论）索引不一致。
+
+实测 `bi:73` 对应的 idx 5 卡片：11 个 `strong`、2 个 `li`，其中 `strongs[0]` 是"当前工作目录或其子目录"（非结论），`strongs[4]` 才是目标"完全不提文件名"。但 parser `ci:0` 期望匹配首条 C2 命中的结论——**DOM 囁全量 strong 导致 ci 与候选序号错位**。
+
+#### 30.4.2 修复：用 hasConclusionMarker 同款判据筛选 DOM �候选
+
+```typescript
+} else if (group === 'conclusion') {
+  // §30: conclusion 的 childIndex 是按"C2 白名单命中"计
+  // (parser 只数含结论特征的 strong/li),但 querySelectorAll('strong, li')
+  // 抓全部加粗/列表(含非结论的"当前工作目录"等),索引不一致。
+  // 修复:用与 parser 同款的 hasConclusionMarker 判据筛选 DOM 候选,
+  // 只数含结论特征(✅⛔❌✓✗/通过/失败/成功/已.../量化)的 strong/li。
+  const verdict = /[✅⛔❌✓✗]|[通过|失败|正确|错误|成功|完美|通关]/;
+  const conclusionMarker = /^(结论|总结|最终|结果|答案|核心|关键|总的来说|综上|最终结论|要点|发现|结论是|总结一下|Conclusion|Summary|Result|Answer|Key|Finding|Finally)/;
+  const doneRe = /^已(创建|修复|完成|修改|设置|找到|解决|实现|添加|删除|更新)/;
+  const doneEnRe = /^(Done|Completed|Fixed|Created|Resolved|Updated|Added|Removed)/;
+  const quantified = /\d+\s*(个|次|条|行|项|处|ms|秒)|\d+\%|\d+\.\d+/;
+  let matchIdx = 0;
+  for (const el of candidates) {
+    const txt = (el.textContent || '').trim();
+    if (!txt || txt.length < 5) continue;
+    if (conclusionMarker.test(txt) || verdict.test(txt) ||
+        doneRe.test(txt) || doneEnRe.test(txt) || quantified.test(txt)) {
+      if (matchIdx === childIndex) {
+        precisionTarget = el;
+        console.log(LOG, `precision: conclusion[${childIndex}] matched by C2 marker`);
+        break;
+      }
+      matchIdx++;
+    }
+  }
+}
+```
+
+判据与 `conclusionParser.ts:hasConclusionMarker` 同款（结论标记词、判断符号、完成态、量化结果），保证 DOM 候选序号与 parser `childIndex` 一致。
+
+### 30.5 验证
+
+实测调 `navFn(73, 0, "conclusion", "conclusion-28")`，console 日志：
+
+```
+[dialog-index] precision: conclusion[0] matched by C2 marker
+[dialog-index] navigated to parserIdx=73 "你明确解除限制、授权我在 D:\\代码\\ 下创建" at (744,-3116)
+```
+
+**两个修复点均已生效**：
+- 公式回退：`navigated to parserIdx=73` 成功定位 ✅
+- C2 粛选：`precision: conclusion[0] matched by C2 marker` ✅
+
+### 30.6 遗留边界：childIndex 与 DOM 候选范围不一致
+
+实测揭示一个新边界问题——跳转到的文本是"你明确解除限制、授权我在 D:\\代码\\ 下创建"，**不是** `bi:73` 条目的"第3轮：完全不提文件名和路径"。
+
+根源：parser `childIndex` 按**该条消息内**的 C2 命中数计，DOM 搜的是**整张卡片**（含多轮回复的多条 message）。`conclusion[0]` 医配到该卡片内首个含 C2 标记的 strong（来自别的消息），而非条目对应的那个。
+
+此边界问题留到下轮（§31）修复。
+
+### 30.7 改动范围
+
+| 文件 | 改动 |
+|------|------|
+| `src/index.tsx` | 跳转公式回退 `childrenIndex = tc - parserIdx`；conclusion 精准定位用 C2 白名单判据筛选 DOM 候选（与 parser `hasConclusionMarker` 同款） |
+
+### 30.8 构建产物
+
+```
+dist/index.js  49.87 KB  (gzip: 14.51 kB)
+```
+
+---
+
+## 31. conclusion 精准定位 childIndex 对齐修复（2026-07-06）
+
+### 31.1 起点：§30.6 遗留边界
+
+§30 实测调 `navFn(73, 0, "conclusion", "conclusion-28")` 跳转后精准命中的文本是"你明确解除限制、授权我在 D:\\代码\\ 下创建"，**不是** `bi:73` 条目的"第3轮：完全不提文件名和路径"。
+
+### 31.2 根源
+
+实测 idx 5 卡片（bi:73 对应）内 DOM C2 命中候选与 parser 条目对照：
+
+| DOM C2 命中序号 | DOM 文本 | parser `ci` | parser 文本 |
+|:------:|------|:------:|------|
+| 0 | "你明确解除限制、授权我在 D:\\代码\\..." | 0 | "第3轮：完全不提文件名和路径" |
+| 1 | "第3轮：完全不提文件名和路径" | 1 | "第4轮：完全无提及" |
+| 2 | "第4轮：完全无提及" | 2 | "全部通过！测试结果如下：" |
+| 3 | "全部通过！测试结果如下：" | — | — |
+
+DOM 有 4 个 C2 命中，parser 只有 3 个条目——**DOM 多了首个"你明确解除限制..."**。这条是 agent 引用 user 原话的 `li`（含"成功"或量化数字被 C2 误命中），parser 因 `msg.type !== "message"` 跳过了它，但 DOM 渲染时它出现在卡片里，`querySelectorAll('strong, li')` 抓到了它，导致候选序号与 parser `childIndex` 错位。
+
+**真实根源**：parser 只对 `type:"message"` 提取结论，但 DOM 卡片含所有类型消息（含 user 引用、reasoning 段残留等）。DOM 的 C2 命中候选序号比 parser 多了非 message 类型的命中。
+
+### 31.3 修复：DOM 端跳过 agent 引用 user 原话的 li
+
+`src/index.tsx` 的 conclusion 精准定位分支加 `userQuote` 正则，跳过含用户口吻被 agent 引用的列表项：
+
+```typescript
+// §31: 跳过 agent 引用 user 原话的 li(含"授权我"、"你会照做"等
+// 用户口吻被 agent 引用的列表项)——parser 按 msg.type!=="message"
+// 跳过了它们,DOM 端也必须跳过才能让候选序号与 parser childIndex 一致。
+const userQuote = /(授权我|你会照做|需要你确认|让你|请你|我要你|帮我|我要)/;
+let matchIdx = 0;
+for (const el of candidates) {
+  const txt = (el.textContent || '').trim();
+  if (!txt || txt.length < 5) continue;
+  // 跳过 agent 引用 user 原话的 li(非真结论,parser 已跳过)
+  if (userQuote.test(txt)) continue;
+  // 用与 parser hasConclusionMarker 同款判据
+  if (conclusionMarker.test(txt) || verdict.test(txt) ||
+      doneRe.test(txt) || doneEnRe.test(txt) || quantified.test(txt)) {
+    if (matchIdx === childIndex) {
+      precisionTarget = el;
+      console.log(LOG, `precision: conclusion[${childIndex}] matched by C2 marker`);
+      break;
+    }
+    matchIdx++;
+  }
+}
+```
+
+### 31.4 验证
+
+实测调 `navFn(73, 0, "conclusion", "conclusion-28")`，console 日志：
+
+```
+[dialog-index] precision: conclusion[0] matched by C2 marker
+[dialog-index] navigated to parserIdx=73 "第3轮：完全不提文件名和路径" at (792,119)
+```
+
+**精准命中目标文本** ✅——不再是上一轮的"你明确解除限制..."，而是正确的"第3轮：完全不提文件名和路径"。
+
+### 31.5 改动范围
+
+| 文件 | 改动 |
+|------|------|
+| `src/index.tsx` | conclusion 精准定位加 `userQuote` 正则跳过 agent 引用 user 原话的 li |
+
+### 31.6 构建产物
+
+```
+dist/index.js  49.97 KB  (gzip: 14.59 kB)
+```
+
 

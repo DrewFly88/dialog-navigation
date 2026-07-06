@@ -162,21 +162,14 @@ try {
             const bubbleList =
               container.querySelector(".qwenpaw-bubble-list") || container;
 
-            // §29: parser bubbleIndex 与 SDK DOM 映射——用 SDK agent card 总数反算。
-            // 视口追踪器实测正确公式: bubbleIndex = sdkCardCount - 1 - agentDomPos
-            //   → agentDomPos = sdkCardCount - 1 - bubbleIndex
-            //   → domIdx = 1 + agentDomPos * 2 (spacer 占 idx 0，后成对)
-            // 注: parser cardIdx 有跳跃(SDK 合并多消息为单卡)，此公式对单消息卡精准，
-            // 多消息卡可能偏移——根因是 parser 与 SDK 坐标系不一致，需架构层修复。
+            // §30: 跳转公式与视口追踪器（useViewportTracker）同源。
+            // 视口追踪器实测正确: agentDomPos = indexOf(el) - 1
+            //   → bubbleIndex = tc - 1 - agentDomPos = tc - 1 - (idx - 1) = tc - idx
+            //   → idx = tc - bubbleIndex
+            // 实测: bi=77(newest) → idx 1 ✅, bi=73 → idx 5 ✅, bi=5 → idx 73 ✅
+            // §29 误改成 sdkCardCount-1-parserIdx + agentDomPos*2 完全错误,本轮回退。
             const isTopic = group === "topic";
-            const agentCards = Array.from(bubbleList.children).filter((el) =>
-              el.classList.contains("qwenpaw-bubble-start")
-            );
-            const sdkCardCount = agentCards.length;
-            const agentDomPos = sdkCardCount - 1 - parserIdx;
-            const childrenIndex = isTopic
-              ? 2 + agentDomPos * 2  // user bubble
-              : 1 + agentDomPos * 2; // agent card
+            const childrenIndex = tc - parserIdx;
 
             const getTarget = (): HTMLElement | null => {
               const cl = bubbleList.children;
@@ -295,6 +288,39 @@ try {
                         if (matchIdx === childIndex) {
                           precisionTarget = el.closest('[class*="toolCallCompact"]') as HTMLElement || el;
                           console.log(LOG, `precision: tool[${childIndex}] matched by unique label`);
+                          break;
+                        }
+                        matchIdx++;
+                      }
+                    }
+                  } else if (group === 'conclusion') {
+                    // §30: conclusion 的 childIndex 是按"C2 白名单命中"计
+                    // (parser 只数含结论特征的 strong/li),但 querySelectorAll('strong, li')
+                    // 抓全部加粗/列表(含非结论的"当前工作目录"等),索引不一致。
+                    // 修复:用与 parser 同款的 hasConclusionMarker 判据筛选 DOM 候选,
+                    // 只数含结论特征(✅⛔❌✓✗/通过/失败/成功/已.../量化)的 strong/li。
+                    // §31: 跳过 agent 引用 user 原话的 li(含"授权我"、"你会照做"等
+                    // 用户口吻被 agent 引用的列表项)——parser 按 msg.type!=="message"
+                    // 跳过了它们,DOM 端也必须跳过才能让候选序号与 parser childIndex 一致。
+                    const verdict = /[✅⛔❌✓✗]|[通过|失败|正确|错误|成功|完美|通关]/;
+                    const conclusionMarker = /^(结论|总结|最终|结果|答案|核心|关键|总的来说|综上|最终结论|要点|发现|结论是|总结一下|Conclusion|Summary|Result|Answer|Key|Finding|Finally)/;
+                    const doneRe = /^已(创建|修复|完成|修改|设置|找到|解决|实现|添加|删除|更新)/;
+                    const doneEnRe = /^(Done|Completed|Fixed|Created|Resolved|Updated|Added|Removed)/;
+                    const quantified = /\d+\s*(个|次|条|行|项|处|ms|秒)|\d+\%|\d+\.\d+/;
+                    // user 原话特征:agent 引用用户确认/指令的列表项,非真结论
+                    const userQuote = /(授权我|你会照做|需要你确认|让你|请你|我要你|帮我|我要)/;
+                    let matchIdx = 0;
+                    for (const el of candidates) {
+                      const txt = (el.textContent || '').trim();
+                      if (!txt || txt.length < 5) continue;
+                      // 跳过 agent 引用 user 原话的 li(非真结论,parser 已跳过)
+                      if (userQuote.test(txt)) continue;
+                      // 用与 parser hasConclusionMarker 同款判据
+                      if (conclusionMarker.test(txt) || verdict.test(txt) ||
+                          doneRe.test(txt) || doneEnRe.test(txt) || quantified.test(txt)) {
+                        if (matchIdx === childIndex) {
+                          precisionTarget = el;
+                          console.log(LOG, `precision: conclusion[${childIndex}] matched by C2 marker`);
                           break;
                         }
                         matchIdx++;
