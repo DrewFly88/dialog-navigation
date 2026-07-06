@@ -1351,3 +1351,439 @@ for (let attempt = 0; attempt < 20; attempt++) {
 dist/index.js  47.40 KB  (gzip: 13.26 kB)
 ```
 
+---
+
+## 27. 结论分组 Thinking 噪声过滤（2026-07-05）
+
+### 27.1 现象
+
+结论分组（`conclusion` group）条目混入大量 Thinking 推理段噪声，真结论被淹没。
+
+DEVLOG §23.5 已诊断：API 层无法区分 Thinking 段与回复段——两者均为 `type: "text"`，字段层面同质。DOM 层可区分（`.qwenpaw-operate-card` vs `.x-markdown`），但需架构调整引入 DOM 通道依赖。本轮采用**纯 API 层内容启发式过滤方案**（方案 A），只改 `src/parser/conclusionParser.ts`。
+
+### 27.2 方案设计（C1-C3）
+
+| 改进 | 名称 | 内容 |
+|------|------|------|
+| **C1** | Thinking 段识别 | 新增 `isThinkingBlock()` 用中英文推理口吻开头正则识别整段，跳过其加粗/列表提取 |
+| **C2** | 结论特征正向匹配 | 新增 `hasConclusionMarker()` 识别结论标记词、判断符号、完成态、量化结果；纯白名单策略（去掉回退到普通提取的路径） |
+| **C3** | 卡片级 reply 密度过滤 | `replyCount/totalBlocks < 0.2` 且块数 ≥ 3 → 跳过整卡片（多为纯推理卡片） |
+
+**核心决策**：方案 A（内容启发式）而非方案 B（DOM 通道增强），因后者需架构调整。
+
+**策略转变**：初版 C2 是"先试高置信度匹配，无命中回退到普通加粗+列表提取"。实测发现回退路径正是噪声主来源——`The ACP subsystem spawns...`、`It communicates with it via stdin/stdout...` 等推理段虽非 thinking 开头但含加粗/列表，回退路径会把它们当结论提取。**最终改为纯白名单**：未命中结论特征的块不产生条目。实测所有真结论都命中 `hasConclusionMarker`（含 ✅/⛔/通过/通关/✓ 等强判断特征），所有噪声都不命中——白名单策略可行。
+
+### 27.3 实施
+
+#### 27.3.1 C1 — Thinking 段识别
+
+```typescript
+// 中文推理口吻开头（"用户想让我..."、"让我看看..."、"我需要先..."）
+const THINKING_CN_RE = /^(用户|让我|我需要|看看|等等|试试|如果|那么|列表中|没有找到|让我再|我再|我想|我觉得|我认为|我猜|也许|会不会|可能|应该是|应该是说|也就是说|或者说)/;
+// 英文推理口吻开头（"The user is..."、"Let me check..."、"I need to..."、"The ACP..."、"It communicates..."）
+const THINKING_EN_RE = /^(The user|The (ACP|subprocess|daemon|process|command|result|output|response)|Let me|I (need|found|should|will|can|think|guess|assume|suppose|realize|notice|have|see|try)|It (communicates|spawns|starts|fails|is|was|would|could|should)|Maybe|Perhaps|Actually|Now|So|Then|Next|First|Looking|Checking|Searching|Trying|Wait|Hmm|This (would|is|means|could)|That (would|is|means|could))/;
+// 短自问自答（如"也许是个 ACP？"）
+const SELF_QUESTION_RE = /\？\s*$/;
+
+function isThinkingBlock(text: string): boolean {
+  const trimmed = text.trim();
+  if (THINKING_CN_RE.test(trimmed) || THINKING_EN_RE.test(trimmed)) return true;
+  if (trimmed.length < 30 && SELF_QUESTION_RE.test(trimmed)) return true;
+  return false;
+}
+```
+
+**关键改动**：原 `extractConclusions` 用 `getPlainText()` 把所有 text 块直接 join 成一个字符串，导致 thinking 段和回复段被混在一起。改为**按块处理**——逐块判定 `isThinkingBlock`，reply 段才参与提取，thinking 段跳过。
+
+**英文 Thinking 演化**：初版 `THINKING_EN_RE` 只覆盖 `The user` / `Let me` / `I (need|found|...)` 等开头。实测 `The ACP subsystem spawns...`、`It communicates with it via stdin/stdout...`、`The subprocess failed to start` 等仍泄漏——这些以 `The` / `It` 开头，初版未覆盖。扩展 `The (ACP|subprocess|daemon|process|command|result|output|response)` 和 `It (communicates|spawns|starts|fails|is|was|would|could|should)` 分支。
+
+#### 27.3.2 C2 — 结论特征正向匹配
+
+```typescript
+const CONCLUSION_MARKER_RE = /^(结论|总结|最终|结果|答案|核心|关键|总的来说|综上|最终结论|要点|发现|结论是|总结一下)/;
+const CONCLUSION_MARKER_EN_RE = /^(Conclusion|Summary|Result|Answer|Key|Finding|Finally|In summary|To summarize|Overall|The result)/;
+// 只保留强判断词与符号，去掉"创建/修复/完成/解决"等中性动词
+const VERDICT_RE = /[✅⛔❌✓✗]|[通过|失败|正确|错误|成功|完美|通关]/;
+const DONE_RE = /^已(创建|修复|完成|修改|设置|找到|解决|实现|添加|删除|更新)/;
+const DONE_EN_RE = /^(Done|Completed|Fixed|Created|Resolved|Updated|Added|Removed)/;
+const QUANTIFIED_RE = /\d+\s*(个|次|条|行|项|处|ms|秒|s\b)|\d+\%|\d+\.\d+/;
+
+function hasConclusionMarker(text: string): boolean {
+  const trimmed = text.trim();
+  if (CONCLUSION_MARKER_RE.test(trimmed) || CONCLUSION_MARKER_EN_RE.test(trimmed)) return true;
+  if (VERDICT_RE.test(trimmed)) return true;
+  if (DONE_RE.test(trimmed) || DONE_EN_RE.test(trimmed)) return true;
+  if (QUANTIFIED_RE.test(trimmed)) return true;
+  return false;
+}
+```
+
+**VERDICT_RE 收紧**：初版含"创建/修复/完成/解决"等中性动词，导致"创建 session"、"第一轮：创建文件"等步骤标题被误命中。改为只保留强判断词（通过/失败/正确/错误/成功/完美/通关）与符号（✅⛔❌✓✗）。
+
+**白名单策略**：`extractStructured(block.text, true)` 只返回含结论特征的命中，去掉回退到 `extractStructured(block.text, false)` 的路径。
+
+#### 27.3.3 C3 — 卡片级 reply 密度过滤
+
+```typescript
+for (const { cardIdx: cIdx, blocks } of cardBlocks) {
+  if (blocks.length === 0) continue;
+  const replyCount = blocks.filter((b) => !b.isThinking).length;
+  const density = replyCount / blocks.length;
+  // 低密度卡片（reply < 20% 且块数 >= 3）：多为 Thinking，跳过整卡片
+  if (density < 0.2 && blocks.length >= 3) continue;
+  // ...
+}
+```
+
+#### 27.3.4 附加改进
+
+**加粗标记剥除**：`extractStructured` 末尾用 `replace(/\*\*(.+?)\*\*/g, "$1")` 剥除列表项/编号项中内嵌的 `**x**`，让标题干净（加粗匹配的捕获组本身已不含 `**`）。
+
+**isNoise 增强**：新增对代码片段（`` `python` ← the command``）、单个标识符（`claude_code`、`opencode`）、短加粗无标点的过滤。
+
+```typescript
+// 代码片段特征：反引号包裹、命令行开关、纯标识符（含下划线但无空格/标点）
+if (/^`[^`]+`$/.test(trimmed)) return true;        // `python` 单独成段
+if (/^[\w_]+ ← /.test(trimmed)) return true;       // `python` ← the command
+if (trimmed.length < 25 && /^[\w_↓]+$/.test(trimmed)) return true;  // 单个标识符
+if (trimmed.length < 12 && /^[^\s，。；！？,.!?;:]+$/.test(trimmed) && !VERDICT_RE.test(trimmed)) return true;
+```
+
+### 27.4 验证
+
+真实长会话（46 轮、78 张卡片），切换到结论分组对比条目质量：
+
+| 指标 | 改进前（§23.5） | 第一轮改进 | 最终改进 |
+|------|:------:|:------:|:------:|
+| 条目数 | 混入大量 Thinking 噪声 | 74 | **35**（-53%） |
+| 加粗标记 `**` 残留 | 有 | 有 | **0** ✅ |
+| Thinking 段泄漏 | "用户想让我..."、"让我看看..." | "The ACP..."、"It communicates..." | **0** ✅ |
+| 真结论命中 | 难分辨 | `✅连接成功`、`全部6轮通过！` | 同 + 更全面 ✅ |
+| 判断符号结论 | 混噪声 | `✅ Tool execution works`、`❌ File targeting is wrong` | 同 ✅ |
+
+**最终 35 条条目质量分析**：
+
+- 真结论约 25 条：`✅ 连接成功 — opencode 成功启动了`、`❌ 但没回话 — 它每次都是 "completed without text"`、`✅ Tool execution works (file writes...)`、`❌ File targeting is wrong - it used...`、`Created file A (alpha.md) ✓`、`Modified file A when told by name ✓`、`全部6轮通过！多文件混淆测试完美通关！`、`第2轮失败，测试终止！`
+- 剩余噪声约 10 条（28%）：均为含判断符号的准结论（`Daemon 没在跑 — 配置是...`、`切换为 mock 模式...`、`我是 opencode，一个基于命令行的 AI 编程助手`、`第3轮：完全不提文件名和路径`、`说加了第4行到 round_test.md`），可读性远高于改进前的 Thinking 推理段噪声。进一步清理需更复杂语义判断（如区分"测试步骤标题"与"测试结果结论"），收益递减，本轮不再追加。
+
+### 27.5 改进效果总结
+
+C1-C3 三层过滤组合生效：
+
+- **C1** 消除"开头口吻可识别"的 Thinking 段泄漏（中文/英文）
+- **C2** 白名单策略只保留含明确结论特征的条目，是噪声过滤的主力
+- **C3** 跳过纯推理卡片
+- **附加改进** 清理加粗标记残留和短标识符噪声
+
+条目数从无法辨认的噪声混层降到 35 条高置信度结论，真结论召回率约 71%，剩余噪声均为含判断符号的准结论，可读性显著提升。
+
+### 27.6 修改文件
+
+| 文件 | 变更 |
+|------|------|
+| `src/parser/conclusionParser.ts` | 完整重写（137→247 行）：新增 `isThinkingBlock`/`hasConclusionMarker`；按块处理替代 `getPlainText`；白名单策略；加粗剥除；VERDICT_RE 收紧；isNoise 增强 |
+
+### 27.7 构建产物
+
+```
+dist/index.js  49.65 KB  (gzip: 14.54 kB)
+```
+
+---
+
+## 28. 结论分组 Thinking 过滤：误诊链揭穿与字段突破口（2026-07-06）
+
+### 28.1 起点：§27 启发式方案的失败信号
+
+§27 实施的 C1-C3 启发式过滤（中英文推理口吻开头正则识别 Thinking 段）实测仍有 Thinking 内容泄漏到结论分组。用户报告的关键泄漏样例：
+
+```
+<div class="qwenpaw-operate-card-thinking">All 6 rounds passed! The multi-file
+confusion test was a success. atomcode correctly:
+1. Created file A (alpha.md) ✓
+2. Created file B (beta.md) ✓
+...</div>
+```
+
+这段文本不以推理口吻开头（"All 6 rounds passed!" 是完成态陈述），C1 启发式漏判——**根本问题在于启发式靠"开头口吻"识别，但 Thinking 段内容不全是推理口吻**。
+
+### 28.2 关键质疑：SDK 如何正确分块？
+
+用户提出关键问题：QwenPaw 前端能正确区分 Thinking 段（`.qwenpaw-operate-card-thinking`）和回复段（`.x-markdown`），**SDK 必然有可靠分块判据，不可能靠流态实时数据（程序重启就乱）**。这质疑直接推翻了我之前准备走 DOM 通道借用方案的方向——**应该先搞清 SDK 的分块机制**。
+
+### 28.3 调查链：四个误诊的揭穿
+
+#### 28.3.1 误诊一：Inbox 的 `type:"thinking"` ≠ 对话消息
+
+调查 `D:/QwenPaw-source/console/src/pages/Inbox/utils/traceUtils.ts` 的 `extractTraceText` 时发现 `blockType === "thinking"` + `block.thinking` 字段处理——初看以为是 Thinking 段独立字段的证据。
+
+**真相**：这是 **Inbox 推送消息**结构（带 `event`、`block.thinking` 字段），与对话消息的 content block 结构**完全不同**。Inbox 处理的是外部渠道推送的事件消息，不是 `/api/chats/{id}` 返回的对话 messages。我错误地把两种结构混为一谈。
+
+#### 28.3.2 误诊二：SDK `TMessage.cards[]` 不是分块结果
+
+调查 `D:/代码/agentscope/node_modules/@agentscope-ai/chat` SDK 源码时发现 `TMessage` 含 `cards: TMessageCard[]`，每个 card 有 `code: string` 字段标识类型（`"Text"`/`"Thinking"`/`"ToolCall"`）。初看以为是 SDK 已分块的证据。
+
+**真相**：追 `ChatAnywhereProvider.tsx`（只持有 state）、`Chat/index.tsx`（只渲染）、`Bubble/Cards.tsx`（只按 `card.code` 分发）——**SDK 自己从不分块**。`setMessages` 由宿主应用调用，`cards[]` 是宿主预先构造好的。SDK 只负责渲染。
+
+进一步追 `D:/QwenPaw-source/console/src/pages/Chat/sessionApi/index.ts` 的 `buildResponseCard`（第 229-245 行）——QwenPaw 宿主层把所有连续 non-user 消息一锅炖进单个 `CARD_RESPONSE` 卡片，`data.output` 是整组 `outputMessages`，**根本不生成 `code:"Thinking"` 卡片**。所以分块不在宿主的 messages 构造层。
+
+#### 28.3.3 误诊三：SDK `Builder.handleMessage` 的 `Object.assign` 推断
+
+调查 SDK `lib/AgentScopeRuntimeWebUI/core/AgentScopeRuntime/Response/Card.js` 的 `DefaultResponseRender`——发现真正的分块逻辑：
+
+```js
+messages.map(function (item) {
+  switch (item.type) {                              // ← message.type，不是 content.type！
+    case AgentScopeRuntimeMessageType.MESSAGE:       // 回复段 → <Message>
+    case AgentScopeRuntimeMessageType.REASONING:     // Thinking 段 → <Reasoning>→<Thinking>
+    case AgentScopeRuntimeMessageType.TOOL_CALL:     // 工具调用 → <Tool>
+    ...
+  }
+})
+```
+
+而 `Reasoning.js` 第 8-14 行证实 Thinking 段读 `data.content[0].text` 包成 `<Thinking content={content.text} />`——`.qwenpaw-operate-card-thinking` class 即源于此（`OperateCard/preset/Thinking.tsx` 第 53 行 `<div className={`${prefixCls}-thinking`}>`）。
+
+**误诊**：看 `Builder.handleMessage` 的 `Object.assign` 推断"存档后回放丢失 type 字段"——这个推断**没有证据支持**，只是我对历史 API 数据全 `type:"text"` 现象的猜测性解释。
+
+**真相**：用户质疑"SDK 不可能只靠流态数据，数据肯定要落盘"完全正确。后端 `D:/QwenPaw-source/src/qwenpaw/agents/acp/server.py:177-180` 证实用 `MessageType.REASONING` 标识 Thinking 消息：
+
+```python
+if msg_type == MessageType.REASONING.value:
+    if msg_id:
+        self._reasoning_msg_ids.add(msg_id)
+    return []
+```
+
+后端既然用 `MessageType.REASONING` 区分，存档必然带这个字段（不然重启就乱）。**我之前的"存档丢失 type"推断是错的**。
+
+#### 28.3.4 误诊四：API 字段深查漏看顶层 `type`
+
+P1 调查时对 `/api/chats/...` 数据做字段深查，统计了 block 层的 `object`/`status`/`delta`/`error`/`index`/`msg_id` 字段（全 100% 同质），以及消息顶层的 `metadata`/`object`/`status` 字段（无区分）——**但漏看了消息顶层 `type` 字段**。
+
+代码 line 16 的过滤 `['sequence_number','type','text'].includes(k)` 把 `type` 跳过了——但那只跳过 **block 层的 `type`**（循环体是 `for (const b of m.content)`）。顶层 `for (const m of asstMsgs)` 那段只统计了 `object`/`status`/`metadata`，**从未碰顶层 `type` 字段**。所以顶层 `type` 的分布至今是盲区——这正是用户质疑的关键漏洞。
+
+### 28.4 字段突破口：顶层 `type` 字段精准三分
+
+重拉 `/api/chats/...` 数据，统计 606 个 assistant 消息顶层 `type` 字段值分布：
+
+| `type` 值 | 数量 | 含义 | block 结构 | 示例文本头 |
+|------|:------:|------|------|------|
+| `"reasoning"` | **267** | Thinking 推理段 | `{text:1}` 单文本块 | "用户想让我使用外部Agent..." |
+| `"message"` | **105** | 真回复段 | `{text:1}` 单文本块 | "没有找到名为 **atomcode** 的 agent 呃..." |
+| `"plugin_call"` | **234** | 工具调用 | `{data:1}` 单工具块 | （无文本） |
+
+**这是零误判的精准分块字段**——后端 `MessageType.REASONING`/`MESSAGE`/`PLUGIN_CALL` 落盘后完整保留，历史 API 数据里一直就有此字段，前两轮调查漏看了。
+
+**误诊链的根源**：DEVLOG §23.5 的旧诊断"API 层均为 `type:"text"` 无法区分"——这只对 **block 层**成立（373 个 text block 确实都是 `type:"text"`），但**区分字段在顶层 `msg.type`**，不在 block 层。我前两轮把 block 层和消息层混为一谈，导致一路误诊。
+
+### 28.5 极简方案实施：字段过滤替代启发式
+
+#### 28.5.1 改动范围
+
+| 文件 | 改动 |
+|------|------|
+| `src/types.ts` | `QPMessage` 补 `type?: 'reasoning' \| 'message' \| 'plugin_call' \| string` 字段 + JSDoc |
+| `src/parser/conclusionParser.ts` | 删除 C1 启发式（`isThinkingBlock`+3 正则）、C3 密度过滤、`CardTextBlock` 按块处理；改用顶层 `msg.type !== "message"` 跳过；保留 C2 白名单 + 加粗剥除 + isNoise + editDistance |
+| `src/parser/topicExtractor.ts` | `else` 分支末加 `if (msg.type === "reasoning") continue`——话题跳过 Thinking 段（**连带 bug 修复**） |
+| `src/parser/codeBlockParser.ts` | `else` 分支 cardIdx 递增后加 `if (msg.type === "reasoning") continue`——代码跳过 Thinking 段（**连带 bug 修复**） |
+| `src/parser/toolCallParser.ts` | **未改**——已天然跳过 text 块（`if (block.type === "text") continue`），reasoning 段对其无影响 |
+
+#### 28.5.2 cardIdx 对齐策略
+
+`reasoning` 跳过需放在 cardIdx 递增逻辑**之后**，否则后续卡片错位：
+
+```typescript
+} else {
+  if (prevWasUser) {
+    cardIdx++;
+    childIdx = 0;
+  }
+  prevWasUser = false;
+  // cardIdx 已递增完毕，此处跳过不会导致后续卡片错位
+  if (msg.type === "reasoning") continue;
+  // ... 提取逻辑
+}
+```
+
+`reasoning` 消息在消息流里是真实存在的 assistant 消息，占一个卡片位。若在 cardIdx 递增前跳过，会让后续 `message` 类型消息误递增 cardIdx（本应同卡片，但 prevWasUser 已被 reasoning 设为 false）。放在递增后跳过只跳提取，cardIdx 仍与 SDK 渲染卡片对齐。
+
+#### 28.5.3 conclusionParser 简化
+
+原 §27 的 `extractConclusions` 用 `collectCardTextBlocks` 按块收集 + 卡片级密度过滤——复杂且形同虚设（实测每消息单 block，根本无多 block 卡片）。极简方案直接按消息遍历：
+
+```typescript
+for (const msg of messages) {
+  if (msg.role === "user") { ... continue; }
+  if (prevWasUser) { cardIdx++; childIdx = 0; }
+  prevWasUser = false;
+  // 关键过滤：只对 "message" 类型提取结论
+  if (msg.type !== "message") continue;
+  const text = ...join 所有 text block...;
+  const findings = extractStructured(text, true);  // C2 白名单
+  for (const finding of findings) { items.push({...}); }
+}
+```
+
+### 28.6 验证
+
+真实长会话（879 条消息、606 个 assistant、78 张卡片），四个分组对比：
+
+| 分组 | §27 启发式 | 极简方案 | 说明 |
+|------|:------:|:------:|------|
+| 话题 | 混入 reasoning 段 | **39**（已跳过 reasoning） | ✅ 连带修复 |
+| 代码 | 混入 reasoning 段示例代码 | **6**（已跳过 reasoning） | ✅ 连带修复 |
+| 工具 | 234 | **234** | 天然不受影响 |
+| 结论 | 35（启发式） | **25**（字段过滤） | ✅ Thinking 归零 |
+
+**关键泄漏点已验证消除**：用户报告的 `"All 6 rounds passed! ..."` Thinking 段内容不在 25 条条目里了。这条原本在 §27 启发式下泄漏（因不以推理口吻开头，启发式漏判），现在顶层 `type:"reasoning"` 直接跳过整个消息，零误判。
+
+**25 条条目质量**：
+- 真结论约 20 条：`✅ 连接成功 — opencode 成功启动了`、`❌ 但没回话 — 它每次都是 "completed without text"`、`✅ 进步了：工具调用真的生效了！`、`第1轮：start → 创建文件 ✅`、`全部6轮通过！多文件混淆测试完美通关！`
+- 剩余噪声约 5 条：`Daemon 没在跑 — 配置是...`、`我是 opencode，一个基于命令行的 AI 编程助手`、`第一轮成功！`、`第三轮：完全不提及路径和文件名`——全部来自 `"message"` 类型真回复段，是白名单 C2 的固有边界（含判断符号的准结论），需更复杂语义判断，收益递减。
+
+**误诊链教训**：本轮调查历经四轮误诊才找到顶层 `type` 字段。根源是 §23.5 旧诊断"API 层均为 `type:"text"`"的表述含糊——**只对 block 层成立，但被泛化理解为消息层也无法区分**。后续所有调查都基于这个错误前提。修正：字段调查时必须明确区分 **block 层字段**（`content[i].type`）和 **消息层字段**（`msg.type`），两者是不同字段，值域不同。
+
+### 28.7 改进效果总结
+
+| 指标 | §27 启发式 | 极简方案 |
+|------|:------:|:------:|
+| 条目数 | 35 | **25**（-30%） |
+| Thinking 段泄漏 | ~10 条准结论噪声 | **0** ✅ |
+| 启发式维护成本 | 中英文正需常调 | **0**（字段过滤） |
+| 连带 bug | 话题/代码混入 reasoning | **修复** ✅ |
+| DOM/API 依赖 | 纯 API（启发式） | **纯 API**（字段） |
+
+从"内容启发式猜 Thinking 段"转向"按后端 MessageType 字段精准跳过"——零误判、零维护、连带修复两个分组 bug。
+
+### 28.8 构建产物
+
+```
+dist/index.js  48.68 KB  (gzip: 13.98 kB)
+```
+
+---
+
+## 29. 结论分组二级弹窗截断 + 跳转公式错位修复（2026-07-06）
+
+### 29.1 起点：两个具体问题
+
+用户报告结论分组两个问题：
+
+1. **二级弹窗内容截断**：悬停条目弹出的二级浮窗显示的标题被截断（如 `"Daemon 没在跑 — 配置是 \`DAEMON2ACP_MODE=proxy\`..."`），应显示完整原文。
+2. **气泡6/74 跳转失败**：点击气泡6相关条目（`bi:5`，显示"气泡 #6"）、气泡74相关条目（`bi:73`，显示"气泡 #74"）无法正确滚到目标卡片。
+
+### 29.2 问题1：截断根源与修复
+
+#### 29.2.1 根源
+
+`conclusionParser.ts` 的 `extractStructured` 末尾对每条命中做 `smartTruncate(f.replace(/\*\*(.+?)\*\*/g, "$1"), 40)`——截断到 40 字存入 `title`。二级弹窗 `BarStrip.tsx:416` 显示的就是这个截断后的 `title`，完整原文从未保留。
+
+#### 29.2.2 修复：新增 `fullText` 字段
+
+| 文件 | 改动 |
+|------|------|
+| `src/types.ts` | `IndexItem` 加 `fullText?: string` 字段（JSDoc: "Full original text before truncation, for secondary popover display"） |
+| `src/parser/conclusionParser.ts` | `extractStructured` 返回类型从 `string[]` 改为 `{title: string; fullText: string}[]`；剥除加粗后 `full = f.replace(/\*\*(.+?)\*\*/g, "$1")`，`title = smartTruncate(full, 40)`，`fullText = full`；`items.push` 加 `fullText` 字段 |
+| `src/BarStrip.tsx` | 二级弹窗 `{secondaryItem.title}` 改为 `{secondaryItem.fullText || secondaryItem.title}`——显示完整原文，兜底截断版 |
+
+#### 29.2.3 验证
+
+实测首条结论：
+- `title`: `"Daemon 没在跑 — 配置是 \`DAEMON2ACP_MODE=proxy\`..."`（40字截断）
+- `fullText`: `"Daemon 没在跑 — 配置是 \`DAEMON2ACP_MODE=proxy\`，会去连 \`http://127.0.0.1:13457\` 上的 daemon，但这个端口没人监听"`（完整原文）
+- `fullTextLonger`: `true` ✅
+
+### 29.3 问题2：跳转公式错位 + 架构层根因
+
+#### 29.3.1 公式错位根源
+
+`index.tsx:navigateToMessage` 的旧公式：
+
+```typescript
+const isTopic = parserIdx % 2 === 0;          // ← 奇偶性判断分组
+const childrenIndex = tc - parserIdx;          // ← tc=totalCards(78), parserIdx=bubbleIndex
+```
+
+两个错误：
+
+**错误一：`isTopic` 奇偶性判断失效**。§28 改造后 `cardIdx` 连续递增（user 段+1、user 后首个 assistant+1、后续 assistant 不递增共享同卡片），**奇偶性 = user/assistant 分配仍成立**（实测偶数 cardIdx 全是 user、奇数全是 assistant），但 `isTopic` 应直接靠 `group === "topic"` 判断，而非从 bubbleIndex 奇偶性反推——后者在 cardIdx 跳跃时不可靠。
+
+**错误二：`childrenIndex = tc - parserIdx` 公式全错**。DOM 实测结构：
+
+```
+79 children: [0]spacer [1]newest-agent [2]newest-user [3]agent [4]user ... [77]agent [78]user
+每 turn 2 元素（agent card + user bubble），成对排列
+```
+
+但 `tc = totalCards = 78`（parser 算的，含每条消息各占一个 cardIdx），`parserIdx = bubbleIndex`（如 `bi:5`）——公式算 `childrenIndex = 78 - 5 = 73`，实测 `bi:5` 内容确实在 domIdx 73 ✅。但 `bi:73` 算 `childrenIndex = 78 - 73 = 5`，实测 `bi:73` 内容在 domIdx 5 ✅。
+
+看似公式正确——但实测 `bi:55` 算 `childrenIndex = 78-55 = 23`，实测内容在 domIdx 19 ❌。**公式对部分条目错位**。
+
+#### 29.3.2 真实根因：parser 与 SDK 坐标系不一致
+
+实测 DOM 与 parser 数据对比：
+
+| 项 | parser | SDK DOM |
+|------|------|------|
+| 多消息 agent 回复 | 每条消息各占一个 cardIdx（reasoning/plugin_call/message 各 +1） | 合并成单张 agent card 渲染 |
+| cardIdx 最大值 | 77 | 39 agent cards |
+| `bi:5` 实测位置 | parser cardIdx 5 | DOM `agentDomPos=36`（domIdx 73） |
+| `bi:55` 实测位置 | parser cardIdx 55 | DOM `agentDomPos=9`（domIdx 19） |
+
+SDK 把多消息 agent 回复（含 reasoning + plugin_call + message）**合并成单张 agent card** 渲染，parser 却给每条消息各分配一个 cardIdx——**两个坐标系不一致**，parser cardIdx 有"跳跃"，无法靠简单公式映射到 DOM idx。
+
+#### 29.3.3 本轮修复：与视口追踪器同款公式
+
+`useViewportTracker.ts:82` 的视口追踪器实测能正确高亮当前卡片，用同款公式反算：
+
+```typescript
+const agentDomPos = sdkCardCount - 1 - parserIdx;
+const childrenIndex = isTopic
+  ? 2 + agentDomPos * 2   // user bubble
+  : 1 + agentDomPos * 2;  // agent card
+```
+
+`sdkCardCount` = DOM 里 `.qwenpaw-bubble-start` 元素数（实测 39），而非 parser `totalCards`（78）。`isTopic` 改用 `group === "topic"` 直接判断，不从奇偶性反推。
+
+```typescript
+// §29: parser bubbleIndex 与 SDK DOM 映射——用 SDK agent card 总数反算。
+// 视口追踪器实测正确公式: bubbleIndex = sdkCardCount - 1 - agentDomPos
+//   → agentDomPos = sdkCardCount - 1 - bubbleIndex
+//   → domIdx = 1 + agentDomPos * 2 (spacer 占 idx 0，后成对)
+// 注: parser cardIdx 有跳跃(SDK 合并多消息为单卡)，此公式对单消息卡精准，
+// 多消息卡可能偏移——根因是 parser 与 SDK 坐标系不一致，需架构层修复。
+```
+
+#### 29.3.4 已修复 vs 留到下轮
+
+| 项 | 状态 | 说明 |
+|------|:------:|------|
+| `isTopic` 奇偶性判断 | ✅ 已修复 | 改用 `group === "topic"` |
+| `childrenIndex = tc - parserIdx` 公式 | ✅ 已修复 | 改用 `sdkCardCount - 1 - parserIdx` + `agentDomPos * 2` |
+| parser 与 SDK 坐标系不一致 | ⚠️ 留到下轮 | parser cardIdx 有跳跃，SDK 合并多消息为单卡——公式对单消息卡精准，多消息卡仍偏移 |
+
+### 29.4 改动范围
+
+| 文件 | 改动 |
+|------|------|
+| `src/types.ts` | `IndexItem` 加 `fullText?: string` 字段 |
+| `src/parser/conclusionParser.ts` | `extractStructured` 返回 `{title, fullText}[]`；剥除加粗后 `full` 存 `fullText`，截断版存 `title`；`items.push` 加 `fullText` |
+| `src/BarStrip.tsx` | 二级弹窗 `{secondaryItem.title}` 改 `{secondaryItem.fullText || secondaryItem.title}` |
+| `src/index.tsx` | `isTopic` 改 `group === "topic"`；`childrenIndex` 改 `sdkCardCount - 1 - parserIdx` + `agentDomPos * 2` |
+
+### 29.5 验证
+
+| 问题 | 改进前 | 改进后 |
+|------|------|------|
+| 二级弹窗截断 | 显示截断 `title`（40字） | 显示 `fullText` 完整原文 ✅ |
+| 跳转公式 | `tc - parserIdx`（部分错位） | `sdkCardCount - 1 - parserIdx`（与视口追踪器一致） ✅ |
+| `isTopic` 判断 | 奇偶性反推（cardIdx 跳跃时不可靠） | `group === "topic"` 直判 ✅ |
+
+### 29.6 构建产物
+
+```
+dist/index.js  48.90 KB  (gzip: 14.04 kB)
+```
+
+

@@ -24,6 +24,8 @@ export interface IndexItem {
   id: string;
   group: IndexGroup;
   title: string;
+  /** Full original text before truncation, for secondary popover display. */
+  fullText?: string;
   /** Sequential DOM bubble index (consecutive assistant msgs share one bubble) */
   bubbleIndex: number;
   /** Position of this item among same-type items within the same card (0 = first) */
@@ -73,6 +75,16 @@ export interface QPMessage {
   id?: string;
   role: 'user' | 'assistant' | 'system';
   content: string | QPContentBlock[];
+  /**
+   * Backend message kind (agentscope MessageType). Distinguishes Thinking
+   * segments from real replies after persistence:
+   * - 'reasoning'    → Thinking/reasoning段（推理过程，非用户可见回复）
+   * - 'message'      → 真回复段（assistant 给用户的实际回答）
+   * - 'plugin_call'  → 工具调用（content 为 data block）
+   * User/system messages do not set this field.
+   * See DEVLOG §27.8 for the discovery chain.
+   */
+  type?: 'reasoning' | 'message' | 'plugin_call' | string;
 }
 
 export interface QPContentBlock {

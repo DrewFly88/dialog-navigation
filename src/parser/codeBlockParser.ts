@@ -79,6 +79,11 @@ export function extractCodeBlocks(messages: QPMessage[]): IndexItem[] {
       }
       prevWasUser = false;
 
+      // Skip Thinking/reasoning segments — example code inside them is not
+      // real code output. cardIdx already incremented above, so card index
+      // stays aligned with SDK-rendered bubbles. See DEVLOG §27.8.
+      if (msg.type === "reasoning") continue;
+
       const text = getPlainText(msg.content);
       let match: RegExpExecArray | null;
       CODE_BLOCK_RE.lastIndex = 0;

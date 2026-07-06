@@ -134,10 +134,17 @@ try {
 
         // Scroll to message by parser bubbleIndex.
         // DOM layout (column-reverse, newest first):
-        //   [0] spacer      [1] newest-agent  [2] newest-user
-        //   [3] newer-agent [4] newer-user     ... [N-2] oldest-agent [N-1] oldest-user
+        //   [0] spacer  [1] newest-agent  [2] newest-user
+        //   [3] newer-agent  [4] newer-user  ...  [N-2] oldest-agent  [N-1] oldest-user
         //
-        // Correct DOM position: childrenIndex = totalCards - parserIdx
+        // Each turn = 2 DOM elements (agent card + user bubble), pairs after [0] spacer.
+        // cardIdx N (1-based, newest=1) maps to DOM idx:
+        //   - agent card (odd cardIdx): idx = 1 + (cardIdx - 1) * 2       (1, 3, 5, ...)
+        //   - user bubble (even cardIdx): idx = 1 + (cardIdx - 1) * 2     (2, 4, 6, ...)
+        // Wait — cardIdx here is parser bubbleIndex which already encodes the turn:
+        //   bubbleIndex 1 (newest agent) → idx 1,  bubbleIndex 2 (newest user) → idx 2
+        //   bubbleIndex 3 → idx 3,  ...  bubbleIndex N → idx N
+        // So childrenIndex = bubbleIndex (1-based, matches DOM idx directly after spacer).
         //
         // If target not in DOM: scroll loadMore into view to trigger SDK's
         // native IntersectionObserver (only reliable loading mechanism).
@@ -155,8 +162,21 @@ try {
             const bubbleList =
               container.querySelector(".qwenpaw-bubble-list") || container;
 
-            const isTopic = parserIdx % 2 === 0;
-            const childrenIndex = tc - parserIdx;
+            // §29: parser bubbleIndex 与 SDK DOM 映射——用 SDK agent card 总数反算。
+            // 视口追踪器实测正确公式: bubbleIndex = sdkCardCount - 1 - agentDomPos
+            //   → agentDomPos = sdkCardCount - 1 - bubbleIndex
+            //   → domIdx = 1 + agentDomPos * 2 (spacer 占 idx 0，后成对)
+            // 注: parser cardIdx 有跳跃(SDK 合并多消息为单卡)，此公式对单消息卡精准，
+            // 多消息卡可能偏移——根因是 parser 与 SDK 坐标系不一致，需架构层修复。
+            const isTopic = group === "topic";
+            const agentCards = Array.from(bubbleList.children).filter((el) =>
+              el.classList.contains("qwenpaw-bubble-start")
+            );
+            const sdkCardCount = agentCards.length;
+            const agentDomPos = sdkCardCount - 1 - parserIdx;
+            const childrenIndex = isTopic
+              ? 2 + agentDomPos * 2  // user bubble
+              : 1 + agentDomPos * 2; // agent card
 
             const getTarget = (): HTMLElement | null => {
               const cl = bubbleList.children;

@@ -30,6 +30,11 @@ export function extractTopics(messages: QPMessage[]): IndexItem[] {
       // Non-user: first one after user starts a new response card
       if (prevWasUser) cardIdx++;
       prevWasUser = false;
+
+      // Skip Thinking/reasoning segments AFTER cardIdx bookkeeping so
+      // subsequent message-type replies stay aligned with SDK bubbles.
+      // reasoning段不是用户可见回复，不应作话题标题. See DEVLOG §27.8.
+      if (msg.type === "reasoning") continue;
     }
   }
 

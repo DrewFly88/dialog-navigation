@@ -413,7 +413,7 @@ export function BarStrip({
         }}
         >
           <div style={{ fontSize: 13, fontWeight: 500 }}>
-            {secondaryItem.title}
+            {secondaryItem.fullText || secondaryItem.title}
           </div>
           <div style={{ fontSize: 11, color: mutedColor, marginTop: 2 }}>
             气泡 #{secondaryItem.bubbleIndex + 1}
