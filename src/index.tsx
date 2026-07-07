@@ -60,7 +60,7 @@ try {
           };
         }, [refresh]);
 
-        const { cardCount: _cc } = useMessageMap(chatContainerRef, debouncedRefresh, containerReady);
+        const { cardCount: _cc, loadCardsToPosition } = useMessageMap(chatContainerRef, debouncedRefresh, containerReady);
         const [activeBubbleIndex, activeToolIndex] = useViewportTracker(chatContainerRef, totalCards, containerReady);
 
         // Navigation loading state — shows "对话加载中…" in BarStrip
@@ -183,62 +183,40 @@ try {
             if (!target) {
               setIsNavigating(true);
               try {
-                // Kick off loadMore once to trigger DOM change + potential
-                // session re-fetch, then wait for everything to settle before
-                // starting the actual scrollToLoadMore loop. Without this,
-                // the re-fetch happens DURING the loop, shifting the DOM
-                // after the target has been positioned.
-                const kickEl = bubbleList.querySelector(
-                  ".qwenpaw-bubble-list-load-more"
-                ) as HTMLElement | null;
-                if (kickEl) {
-                  kickEl.scrollIntoView({ block: "start" });
-                }
-                // Wait for re-fetch to complete and DOM to stabilize
+                // §32: 改用 fiber dispatch 快通道（useMessageMap.loadCardsToPosition）
+                // 替代笨 scroll 循环。scroll 循环靠 IntersectionObserver PAGE_SIZE=10
+                // 逐批加载,远距离目标（如气 #6 是 idx=73,需加载到第 8 页）中途 SDK
+                // re-fetch 时 card 数短暂不变 stall++ 连续 3 次就误判放弃,永远加载不到。
+                // fiber dispatch 直 React 状态调度 targetPage,一次到位加载到含目标
+                // 卡的页,再精准滚定位。
+                // sdkCardPos 必须传「DOM idx - 1」(0-based newest 端 SDK 卡序),不是 parserIdx-1!
+                // parserIdx(bubbleIndex)是 parser 端序号(1=newest),但 idx = tc - parserIdx
+                // 是 DOM 端 newest→oldest 序号——SDK paginate 按 DOM idx 端,newest=idx1 在第 1 页,
+                // 气 #6 parserIdx=5 → idx=73 → sdkCardPos=72 → targetPage=Math.ceil(73/10)+1=9。
+                // §32首轮误传 parserIdx-1=4 → dispatch 只到第 2 页,目标卡未渲染 → fallback。
+                const sdkCardPos = childrenIndex - 1;
+                await loadCardsToPosition(sdkCardPos, bubbleList as HTMLElement);
+                // 等 React 重新渲染含目标卡的页（fiber dispatch 用 flushSync 同步,
+                // 但 session re-fetch 仍需 ~500ms 轮询到达 → 给 1500ms 兜底）
                 await new Promise((r) => setTimeout(r, 1500));
                 target = getTarget();
-
-                if (!target) {
-                  // SDK paginates PAGE_SIZE=10 cards per loadMore trigger.
-                  // A long session can have up to tc cards (tc up to ~80+),
-                  // requiring up to ~8 successful loads from an initial 10.
-                  // Allow more attempts (20) to cover re-fetch overhead and
-                  // SDK throttling, and only give up after consecutive stalled
-                  // rounds (not a single one) — a momentary stall can happen
-                  // when the SDK re-fetches session state mid-loop.
-                  let prevCount = Array.from(bubbleList.children).filter(
-                    (el) => el.classList.contains("qwenpaw-bubble-start") ||
-                            el.classList.contains("qwenpaw-bubble-end")
-                  ).length;
-                  let stallCount = 0;
+                if (target) {
+                  console.log(LOG, `target found after fiber dispatch to page ${Math.ceil(sdkCardPos/10)+1}`);
+                } else {
+                  // Fallback: fiber dispatch 失败时仍走 scroll 循环 兜底
+                  console.warn(LOG, `fiber dispatch did not yield target, fallback to scroll loop`);
                   for (let attempt = 0; attempt < 20; attempt++) {
                     const loadMore = bubbleList.querySelector(
                       ".qwenpaw-bubble-list-load-more"
                     ) as HTMLElement | null;
-                    if (!loadMore) break; // all history loaded
+                    if (!loadMore) break;
                     loadMore.scrollIntoView({ block: "start" });
                     await new Promise((r) => setTimeout(r, 800));
                     target = getTarget();
                     if (target) {
-                      console.log(LOG, `target found after ${attempt+1} scroll loads`);
+                      console.log(LOG, `target found after ${attempt+1} fallback scroll loads`);
                       break;
                     }
-                    const newCount = Array.from(bubbleList.children).filter(
-                      (el) => el.classList.contains("qwenpaw-bubble-start") ||
-                              el.classList.contains("qwenpaw-bubble-end")
-                    ).length;
-                    if (newCount === prevCount) {
-                      stallCount++;
-                      // Consecutive 3 stalls with loadMore still present
-                      // means SDK is not yielding more cards — give up.
-                      if (stallCount >= 3) {
-                        console.warn(LOG, `loadMore stalled 3x consecutively, giving up at attempt ${attempt+1}`);
-                        break;
-                      }
-                    } else {
-                      stallCount = 0;
-                    }
-                    prevCount = newCount;
                   }
                 }
               } finally {
@@ -294,11 +272,17 @@ try {
                       }
                     }
                   } else if (group === 'conclusion') {
-                    // §30: conclusion 的 childIndex 是按"C2 白名单命中"计
-                    // (parser 只数含结论特征的 strong/li),但 querySelectorAll('strong, li')
-                    // 抓全部加粗/列表(含非结论的"当前工作目录"等),索引不一致。
-                    // 修复:用与 parser 同款的 hasConclusionMarker 判据筛选 DOM 候选,
-                    // 只数含结论特征(✅⛔❌✓✗/通过/失败/成功/已.../量化)的 strong/li。
+                    // §32: DOM 端候选序号必须与 parser extractStructured 同源。
+                    // parser 按 BOLD_RE(**x**)→NUMBERED_RE(1. x)→LIST_ITEM_RE(- x)
+                    // 三优先级分抓 findings,childIdx 跨级累加(bold 第 0,第 1...再 numbered,再 list)。
+                    // 但 DOM selectorAll('strong, li') 按 SDK 渲染顺序命,含非加粗的
+                    // 「工作目录问题」等普通 li 序号在前——气 #6 parser childIdx=0
+                    // 是 bold 第 0 条,DOM 命序号 2 → 精准定位错位滚到「关键原则」。
+                    // 修复:DOM 端按 parser 同款三优先级分抓候选——
+                    //   1. strong/bold 加粗命中(boldResults)
+                    //   2. li 数字开头有序项(numberedResults)
+                    //   3. 普通 li(listResults)
+                    // 每级内用 C2 白名单筛,序号跨级累加与 parser childIdx 对齐。
                     // §31: 跳过 agent 引用 user 原话的 li(含"授权我"、"你会照做"等
                     // 用户口吻被 agent 引用的列表项)——parser 按 msg.type!=="message"
                     // 跳过了它们,DOM 端也必须跳过才能让候选序号与 parser childIndex 一致。
@@ -309,23 +293,36 @@ try {
                     const quantified = /\d+\s*(个|次|条|行|项|处|ms|秒)|\d+\%|\d+\.\d+/;
                     // user 原话特征:agent 引用用户确认/指令的列表项,非真结论
                     const userQuote = /(授权我|你会照做|需要你确认|让你|请你|我要你|帮我|我要)/;
+                    const numberedLi = /^\s*\d+[.)]\s+/;
+                    const isC2 = (txt: string) =>
+                      conclusionMarker.test(txt) || verdict.test(txt) ||
+                      doneRe.test(txt) || doneEnRe.test(txt) || quantified.test(txt);
+                    // §32: 按 parser 三优先级分抓 DOM 候选——strong(bold)→numbered li→普通 li
+                    // 但 DOM <strong> 含 SDK 渲染样式加粗(「名字：」「定位：」等字段标签),
+                    // 非 parser 端 BOLD_RE 抓的源 markdown **xxx** 加粗——序号错位根因。
+                    // 筛掉短字段标签类(≤8字+冒号),只保留内容性加粗与 parser 对齐。
+                    const tagPattern = /^[^：:]{1,8}[：:]/;
+                    const boldEls = Array.from(target.querySelectorAll<HTMLElement>('strong'))
+                      .filter(el => !tagPattern.test((el.textContent || '').trim()));
+                    const liEls = Array.from(target.querySelectorAll<HTMLElement>('li'));
+                    const numberedEls = liEls.filter(el => numberedLi.test((el.textContent || '').trim()));
+                    const plainLiEls = liEls.filter(el => !numberedLi.test((el.textContent || '').trim()));
                     let matchIdx = 0;
-                    for (const el of candidates) {
+                    let hit: HTMLElement | null = null;
+                    for (const el of [...boldEls, ...numberedEls, ...plainLiEls]) {
                       const txt = (el.textContent || '').trim();
                       if (!txt || txt.length < 5) continue;
                       // 跳过 agent 引用 user 原话的 li(非真结论,parser 已跳过)
                       if (userQuote.test(txt)) continue;
-                      // 用与 parser hasConclusionMarker 同款判据
-                      if (conclusionMarker.test(txt) || verdict.test(txt) ||
-                          doneRe.test(txt) || doneEnRe.test(txt) || quantified.test(txt)) {
-                        if (matchIdx === childIndex) {
-                          precisionTarget = el;
-                          console.log(LOG, `precision: conclusion[${childIndex}] matched by C2 marker`);
-                          break;
-                        }
-                        matchIdx++;
+                      if (!isC2(txt)) continue;
+                      if (matchIdx === childIndex) {
+                        hit = el;
+                        console.log(LOG, `precision: conclusion[${childIndex}] matched by C2 (parser-aligned order)`);
+                        break;
                       }
+                      matchIdx++;
                     }
+                    if (hit) precisionTarget = hit;
                   } else {
                     const precise = candidates[childIndex];
                     if (precise) {
@@ -372,7 +369,7 @@ try {
               }
             }
           },
-          []
+          [loadCardsToPosition]
         );
 
         return (

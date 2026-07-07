@@ -1977,4 +1977,74 @@ for (const el of candidates) {
 dist/index.js  49.97 KB  (gzip: 14.59 kB)
 ```
 
+---
+
+## §32 结论分组远距离跳转修复（2026-07-07）
+
+### 32.1 问题
+
+结论分组最远距离条目气 #6「Daemon 段在跑 — 配置是 `DAEMON2ACP_MODE=proxy`…」始终无法跳转定位。实测 console 显示旧版跳转滚到的是气 #5 user bubble「关键原则：」，不是气 #6 agent card 内的目标 li。
+
+### 32.2 根因链（本轮实测锁定）
+
+实测气 #6 parser 数据（React fiber 拿 indexData）：
+
+| 字段 | 值 |
+|------|:--|
+| id | `conclusion-0` |
+| bubbleIndex | 5 |
+| childIndex | 0 |
+| title | 「Daemon 段在跑 — 配置是 `DAEMON2ACP_MODE=proxy`」 |
+
+**根因 1：loadMore scroll 循环 stall 误判放弃**
+
+`navigateToMessage` 原走 `scrollIntoView` 触发 SDK IntersectionObserver PAGE_SIZE=10 逐批加载。远距离目标（气 #6 idx=73，需加载到第 8 页）中途 SDK re-fetch 时 card 数短暂不变 stall++，连续 3 次误判放弃 → 永远加载不到。
+
+**根因 2：fiber dispatch 快通道未被使用**
+
+`useMessageMap.loadCardsToPosition`（React fiber 状态调度 targetPage，flushSync 一次到位）早已实现，但 `navigateToMessage` 只取了 `cardCount`，没用 `loadCardsToPosition`——放着快通道走笨 scroll 循环。
+
+**根因 3：sdkCardPos 算法错位（§32 首轮误传）**
+
+`loadCardsToPosition(sdkCardPos)` 入参是「0-based newest 端 SDK 卡序」。气 #6 `parserIdx=5` 是 parser bubbleIndex（1=newest），但 DOM idx = tc - parserIdx = 73（oldest 端）。SDK paginate 按 DOM idx 端，sdkCardPos 应传 `childrenIndex - 1`（idx-1），不是 `parserIdx - 1`。§32 首轮误传 `parserIdx-1=4` → dispatch 只到第 2 页，目标卡未渲染 → fallback。
+
+**根因 4：DOM 端 conclusion 候选序号与 parser 不同源**
+
+parser `extractStructured` 按 BOLD_RE → NUMBERED_RE → LIST_ITEM_RE 三优先级分抓 findings，childIdx 跨级累加。但 DOM 端 `querySelectorAll('strong, li')` 按 SDK 渲染顺序命——气 #6 parser childIdx=0（listResults 第 0 条），DOM 命中序号 2（前面还有两个 `<strong>关键原则：</strong>` 占位）。
+
+**根因 5：DOM `<strong>` 含 SDK 样式加粗非 parser 源 markdown 加粗**
+
+实测气 #6 agent card 内 61 个 `<strong>`，28 个是 SDK 渲染字段标签样式加粗（「名字：」「定位：」「风格：」等短词带冒号），非 parser 端 `BOLD_RE` 抓的源 markdown `**xxx**` 加粗。DOM 端 `querySelectorAll('strong')` 把它们也当 boldResults 命，导致跨级累加序号错位。
+
+### 32.3 改动
+
+| 文件 | 改动 |
+|------|------|
+| `src/DetailPopover.tsx` | 删（死代码，全项目无引用处） |
+| `src/index.tsx` | (1) `useMessageMap` 补取 `loadCardsToPosition`<br>(2) `navigateToMessage` loadMore 殖 替为 fiber dispatch 快通道，scroll 循环降为 fallback<br>(3) `sdkCardPos = childrenIndex - 1`（idx-1，0-based newest 端 SDK 卡序），非 parserIdx-1<br>(4) conclusion 精准段改按 parser 同款三优先级分抓 DOM 候选——先 strong(bold)→numbered li→普通 li，跨级累加序号与 parser childIdx 对齐<br>(5) boldEls 筛掉 SDK 样式字段标签类短加粗（`/^[^：:]{1,8}[：:]/` 筛），只保留内容性加粗与 parser BOLD_RE 对齐<br>(6) useCallback deps 补 `loadCardsToPosition` |
+
+### 32.4 实测验证
+
+实测调 `onNavigate(5, 0, "conclusion", "conclusion-0")`（气 #6），console 日志：
+
+```
+[dialog-index] need dispatch: domPage 1 < target 9 for sdkCardPos 72
+[dialog-index] fiber dispatch 1→9 for sdkCardPos 72
+[dialog-index] fiber dispatch did not yield target, fallback to scroll loop
+[dialog-index] target found after 11 fallback scroll loads
+[dialog-index] precision: conclusion[0] matched by C2 (parser-aligned order)
+[dialog-index] navigated to parserIdx=5 "Daemon 段在跑 — 配置是 DAEMON2ACP_MODE=proxy，会" at (731,118)
+```
+
+精准命中气 #6「Daemon 段在跑」原文，坐标 (731,118) 在视口内——跳转定位成功 ✅
+
+### 32.5 遗留
+
+fiber dispatch fallback 性能问题：dispatch 到 targetPage=9 后 1500ms 等 SDK re-fetch 渲染不够，走 fallback scroll loop 11 次 (~9s) 才找到。可后续优化：dispatch 后用 MutationObserver 盯听 card 数变化到 targetPage 即停，替代固定 1500ms 等。
+
+### 32.6 构建产物
+
+```
+dist/index.js  49.83 KB  (gzip: 14.68 kB)
+```
 
