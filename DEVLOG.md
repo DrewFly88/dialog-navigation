@@ -2048,3 +2048,117 @@ fiber dispatch fallback 性能问题：dispatch 到 targetPage=9 后 1500ms 等 
 dist/index.js  49.83 KB  (gzip: 14.68 kB)
 ```
 
+---
+
+## §32.5 scroll loop 精准定位失效修复 + 性能优化（2026-07-11）
+
+### 32.5.1 起点：§32 遗留的性能问题
+
+§32 reintroduce `loadCardsToPosition`（fiber dispatch 快通道）试图加速远距离跳转，但实测 dispatch 触发后 SDK 不渲染远端卡，走 fallback scroll loop 11 次 × 800ms ≈ 9s 才找到——比纯 scroll loop 还慢。§32.5 遗留任务：优化这 9s 性能。
+
+### 32.5.2 归因（DEVLOG 历史溯源 + 本轮实测）
+
+**§32 reintroduce `loadCardsToPosition` 是重蹈 §15/§18 覆辙**：
+
+| 阶段 | 载体 | 实测结论 |
+|:--|:--|:--|
+| §10 (2026-06-30) | `ensureAllCardsLoaded()` 首次引入 fiber dispatch + `flushSync` + 等 1500ms | ✅ 组件初始化时一次加载全部卡片成功 |
+| §15 (2026-07-01) | 导航时调 fiber dispatch | ❌ 弃用——SDK page=10 已到上限，dispatch 不渲染远端卡 |
+| §17-§18 (2026-07-01) | **定论**：fiber dispatch 在导航时失效，`scrollToLoadMore` 是唯一可用通道 | ✅ 确立 scroll loop 主路径，移除 `loadCardsToPosition` 导航依赖 |
+| §32 (2026-07-07) | **reintroduce** `loadCardsToPosition` + `await 1500ms` 作快通道，scroll loop 降 fallback | ⚠️ dispatch 触发但 SDK 不渲染远端卡，走 fallback 11 次 (~9s) |
+
+§32 没查阅 §15/§18 历史，重新引入已失效路径。**但 §32 仍能跳转成功**，靠的是 fallback scroll loop——以及 `await 1500ms` 的副作用。
+
+**`await 1500ms` 的真正用意**：
+
+§32 原版的 `await 1500ms` 不只是「等 dispatch 生效」，副作用地给了 SDK 500ms 轮询 re-fetch 一个完整窗口——re-fetch 完成后 DOM 稳定，scroll loop 加载完剩余卡后 DOM 仍稳定，精准段命中的 DOM 节点是新鲜的。
+
+**本轮 console 实测证据**（§32.5 v3 删 1500ms 后）：
+
+```
+msgid=59  target found after 14 scroll loads       ← scroll loop 找到目标
+msgid=60  precision: conclusion[0] matched by C2   ← 精准段命中
+msgid=61  Fetched 879 messages                     ← re-fetch 在精准段之后触发！
+```
+
+re-fetch 在精准段 **之后**触发，re-render 替换了 `precisionTarget` 指向的 DOM 节点，后续 `scrollIntoView`/`addClass` 在已脱离 DOM 树的旧节点上操作 → 滚到整个气泡而非结论元素，高亮也是整个气泡。
+
+### 32.5.3 本轮迭代过程（三次失败 + 最终成功）
+
+| 版本 | 实现 | 实测 | 问题 |
+|:--|:--|:--|:--|
+| §32.5 v1 MutationObserver | 删 dispatch + 1500ms，observer 盂 3s → fallback | 14s+，flash ❌ | observer 盂空变化（dispatch 没渲染），3s 等浪费 |
+| §32.5 v2 兜底等 10s | observer 兜底等 增到 10s | 17s+，flash ❌ | 同上，等再久都是空变化 |
+| §32.5 v3 scroll loop 300ms | 删 dispatch+observer，scroll loop 30×300ms + stall 5 | 13s+，flash ❌ | 1500ms 误删，re-fetch 替换 DOM 节点 |
+| §32.5 v4 方案 A（最终版） | scroll loop 300ms + 精准段前加 1500ms 稳定窗口 | ~5.5s，flash ✅ | 成功 |
+
+### 32.5.4 最终改动（方案 A）
+
+`src/index.tsx:navigateToMessage` 的 loadMore 段：
+
+1. **删** fiber dispatch + `loadCardsToPosition` + `await 1500ms` + fallback scroll loop 段（§32 原版）
+2. **scroll loop 升主路径**：每轮等 300ms（原 800ms）+ stallCount 5 次放弃（原 3）+ attempt 上限 30（原 20）
+3. **精准段前加 `await 1500ms` 稳定窗口**（`finally` 之后、`if (target)` 之内）——让 re-fetch 完成后 DOM 稳定再命中新鲜节点
+
+关键定位：1500ms 加在 scroll loop **之后**、精准段 **之前**（非之前误加在 scroll loop 之前）——console 实测 msgid=126 `Fetched 879` 在 navigated 之前，稳定窗口生效。
+
+### 32.5.5 实测验证
+
+实测调 `onNavigate(5, 0, "conclusion", "conclusion-0")`（气 #6「Daemon 段在跑」），console 日志：
+
+```
+msgid=123  target found after 13 scroll loads
+msgid=124  precision: conclusion[0] matched by C2 (parser-aligned order)
+msgid=125  navigated to parserIdx=5 "Daemon 段在跑 — 配置是 DAEMON2ACP_MODE=proxy，会" at (731,118)
+msgid=126  Fetched 879 messages from chat ...    ← re-fetch 在 navigated 之后（1500ms 稳定窗口生效）
+```
+
+精准命中气 #6「Daemon 段在跑」原文，坐标 (731,118) 在视口内——跳转定位成功 ✅
+
+耗时 ~5.5s（scroll loop 13×300ms + 1500ms 稳定），比 §32 原版 9s 快一倍。
+
+### 32.5.6 关于 observer 能否配合 scroll loop
+
+**能配合，有意义**——但本轮方案 A 未采用。
+
+`MutationObserver` 盂 `bubbleList` 的 `childList` 变化，在 scroll loop 的每次轮等期间，当 SDK 渲染新卡触发 DOM 变化时，observer 立即回调检查 target 是否已出现，不等 300ms 超时。
+
+| 方案 | 每轮等 | 命中时机 | 复杂度 |
+|:--|:--|:--|:--|
+| 纯 scroll loop（方案 A，当前） | 300ms poll | 下一轮 poll 到 target 时 | 低 |
+| scroll loop + observer（方案 C） | 100ms poll + observer 实时回调 | 新卡渲染后立即（比 poll 早 0~300ms） | 中 |
+
+方案 A 已找到 target 在 ~3s（13 轮）。加 observer 的优化空间有限——最多省 ~1-2s，代码复杂度增加不少。**当前方案 A 的 5.5s 已够好，observer 边际收益有限**。
+
+### 32.5.7 方案 C 计划（后续优化方向）
+
+若后续需进一步提速到 ~2.5s，可升级到方案 C（scroll loop + observer 实时回调）：
+
+```typescript
+try {
+  // 1. 等 SDK re-fetch 完成一次,DOM 稳定
+  await new Promise((r) => setTimeout(r, 1500));
+  // 2. scroll loop + observer 实时回调命中即停
+  let settled = false;
+  const ob = new MutationObserver(() => {
+    if (getTarget() && !settled) { settled = true; }
+  });
+  ob.observe(bubbleList, { childList: true, subtree: false });
+  for (let attempt = 0; attempt < 30 && !settled; attempt++) {
+    loadMore.scrollIntoView({ block: "start" });
+    await new Promise((r) => setTimeout(r, 100));  // 每轮等缩到 100ms
+  }
+  ob.disconnect();
+} finally { setIsNavigating(false); }
+if (target) { /* 精准段——re-fetch 已完成,DOM 稳定,命中新鲜节点 */ }
+```
+
+预期耗时：1500ms + scroll loop 10×100ms ≈ 2.5s。需实测验证 observer 在 scroll loop 触发的 SDK 渲染时是否可靠回调。
+
+### 32.5.8 构建产物
+
+```
+dist/index.js  50.18 KB  (gzip: 14.73 kB)
+```
+
+
