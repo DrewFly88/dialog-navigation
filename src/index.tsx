@@ -183,48 +183,58 @@ try {
             if (!target) {
               setIsNavigating(true);
               try {
-                // §32: 改用 fiber dispatch 快通道（useMessageMap.loadCardsToPosition）
-                // 替代笨 scroll 循环。scroll 循环靠 IntersectionObserver PAGE_SIZE=10
-                // 逐批加载,远距离目标（如气 #6 是 idx=73,需加载到第 8 页）中途 SDK
-                // re-fetch 时 card 数短暂不变 stall++ 连续 3 次就误判放弃,永远加载不到。
-                // fiber dispatch 直 React 状态调度 targetPage,一次到位加载到含目标
-                // 卡的页,再精准滚定位。
-                // sdkCardPos 必须传「DOM idx - 1」(0-based newest 端 SDK 卡序),不是 parserIdx-1!
-                // parserIdx(bubbleIndex)是 parser 端序号(1=newest),但 idx = tc - parserIdx
-                // 是 DOM 端 newest→oldest 序号——SDK paginate 按 DOM idx 端,newest=idx1 在第 1 页,
-                // 气 #6 parserIdx=5 → idx=73 → sdkCardPos=72 → targetPage=Math.ceil(73/10)+1=9。
-                // §32首轮误传 parserIdx-1=4 → dispatch 只到第 2 页,目标卡未渲染 → fallback。
-                const sdkCardPos = childrenIndex - 1;
-                await loadCardsToPosition(sdkCardPos, bubbleList as HTMLElement);
-                // 等 React 重新渲染含目标卡的页（fiber dispatch 用 flushSync 同步,
-                // 但 session re-fetch 仍需 ~500ms 轮询到达 → 给 1500ms 兜底）
-                await new Promise((r) => setTimeout(r, 1500));
-                target = getTarget();
-                if (target) {
-                  console.log(LOG, `target found after fiber dispatch to page ${Math.ceil(sdkCardPos/10)+1}`);
-                } else {
-                  // Fallback: fiber dispatch 失败时仍走 scroll 循环 兜底
-                  console.warn(LOG, `fiber dispatch did not yield target, fallback to scroll loop`);
-                  for (let attempt = 0; attempt < 20; attempt++) {
-                    const loadMore = bubbleList.querySelector(
-                      ".qwenpaw-bubble-list-load-more"
-                    ) as HTMLElement | null;
-                    if (!loadMore) break;
-                    loadMore.scrollIntoView({ block: "start" });
-                    await new Promise((r) => setTimeout(r, 800));
-                    target = getTarget();
-                    if (target) {
-                      console.log(LOG, `target found after ${attempt+1} fallback scroll loads`);
+                // §32.5: scroll loop 主加载机制(fiber dispatch 在本环境失效——
+                // DEVLOG §15/§18 早有定论:dispatch 改 SDK page 值但不渲染远端卡)。
+                // §32 原版的 await 1500ms 不只是等 dispatch,副作用地给了 SDK 500ms 轮询
+                // re-fetch 一个完整窗口——re-fetch 完成后 DOM 稳定,scroll loop 加载完
+                // 剩余卡后 DOM 仍稳定,精准段命中的 DOM 节点是新鲜的。
+                // §32.5 v3 误删这 1500ms,scroll loop 刚跑完 SDK re-fetch 恰好触发,
+                // re-render 替换了 precisionTarget 指向的 DOM 节点,后续 scrollIntoView 和
+                // addClass 在已脱离 DOM 树的旧节点上操作 → 滚到整个气泡而非结论元素。
+                // 修复:恢复 await 1500ms 稳定窗口 + scroll loop 每轮 300ms + stall 5 次放弃。
+                let prevCount = Array.from(bubbleList.children).filter(
+                  (el) => el.classList.contains("qwenpaw-bubble-start") ||
+                          el.classList.contains("qwenpaw-bubble-end")
+                ).length;
+                let stallCount = 0;
+                for (let attempt = 0; attempt < 30; attempt++) {
+                  const loadMore = bubbleList.querySelector(
+                    ".qwenpaw-bubble-list-load-more"
+                  ) as HTMLElement | null;
+                  if (!loadMore) break;
+                  loadMore.scrollIntoView({ block: "start" });
+                  await new Promise((r) => setTimeout(r, 300));
+                  target = getTarget();
+                  if (target) {
+                    console.log(LOG, `target found after ${attempt+1} scroll loads`);
+                    break;
+                  }
+                  const newCount = Array.from(bubbleList.children).filter(
+                    (el) => el.classList.contains("qwenpaw-bubble-start") ||
+                            el.classList.contains("qwenpaw-bubble-end")
+                  ).length;
+                  if (newCount === prevCount) {
+                    stallCount++;
+                    if (stallCount >= 5) {
+                      console.warn(LOG, `scroll loop stalled 5x, giving up at attempt ${attempt+1}`);
                       break;
                     }
+                  } else {
+                    stallCount = 0;
                   }
+                  prevCount = newCount;
                 }
               } finally {
                 setIsNavigating(false);
               }
             }
 
+            // §32.5: scroll loop 触发 SDK 加载时会引起 re-fetch(console 实测 msgid=61
+            // Fetched 879 在 scroll loop 之后),re-render 替换 precisionTarget 指向的
+            // DOM 节点 → 后续 scrollIntoView/addClass 在已脱离 DOM 树的旧节点上操作,
+            // 滚到整个气泡而非结论元素。等 1500ms 让 re-fetch 完成后 DOM 稳定再精准段。
             if (target) {
+              await new Promise((r) => setTimeout(r, 1500));
               // Detect header overlayer height for scroll offset.
               // Without this, scrollIntoView's "start" aligns with viewport
               // top, hiding the target behind the fixed header.
