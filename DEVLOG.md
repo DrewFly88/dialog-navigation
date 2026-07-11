@@ -2161,4 +2161,71 @@ if (target) { /* 精准段——re-fetch 已完成,DOM 稳定,命中新鲜节点
 dist/index.js  50.18 KB  (gzip: 14.73 kB)
 ```
 
+---
+
+## §32.5c scroll loop + MutationObserver 实时回调（方案 C 实施，2026-07-11）
+
+### 32.5c.1 起点
+
+§32.5 方案 A（scroll loop 每轮 300ms poll + 精准段前 1500ms 稳定窗口）实测 ~5.5s 成功。§32.5.7 记录了方案 C 计划——加 MutationObserver 监 bubbleList childList 变化，SDK 渲染新卡时立即回调命中 target，不等 poll 超时。本轮实施方案 C。
+
+### 32.5c.2 改动
+
+`src/index.tsx:navigateToMessage` 的 scroll loop 段：
+
+1. **加 MutationObserver**：监 `bubbleList` 的 `childList` 变化，SDK 渲染新卡时立即回调检查 `getTarget()`，命中即 `settled=true` + `ob.disconnect()` + 断 loop
+2. **每轮等 300ms → 100ms**：poll 兜底（observer 实时命中为主，poll 为辅）
+3. **stall 5 次放弃 + attempt 上限 30** 保留（防死循环）
+4. **精准段前 1500ms 稳定窗口保留**：re-fetch 在 scroll loop 之后触发，仍需等 DOM 稳定再精准命中新鲜节点
+
+关键代码结构：
+
+```typescript
+let settled = false;
+const ob = new MutationObserver(() => {
+  const t = getTarget();
+  if (t) { target = t; settled = true; ob.disconnect(); }
+});
+ob.observe(bubbleList, { childList: true, subtree: false });
+for (let attempt = 0; attempt < 30 && !settled; attempt++) {
+  loadMore.scrollIntoView({ block: "start" });
+  await new Promise((r) => setTimeout(r, 100));  // poll 兜底
+  if (settled) { console.log(`target found (observer)`); break; }
+  // poll 检查 + stall 逻辑...
+}
+ob.disconnect();
+```
+
+### 32.5c.3 实测验证
+
+实测调 `onNavigate(5, 0, "conclusion", "conclusion-0")`（气 #6「Daemon 没在跑」），console 日志：
+
+```
+msgid=183  target found after 16 scroll loads (observer)       ← observer 命中非 poll
+msgid=184  precision: conclusion[0] matched by C2 (parser-aligned order)
+msgid=185  navigated to parserIdx=5 "Daemon 没在跑 — 配置是 DAEMON2ACP_MODE=proxy，会" at (731,118)
+msgid=186  Fetched 879 messages from chat ...                   ← re-fetch 在 navigated 之后（1500ms 稳定窗口生效）
+```
+
+flash �命中 `<LI>` 元素（非整个气泡），坐标 (731,118) 在视口内——跳转定位精准成功 ✅
+
+**关键证据**：msgid=183 标注 `(observer)`——是 MutationObserver 实时回调命中的，非 poll 超时。方案 C 的 observer 配合 scroll loop 生效 ✅
+
+### 32.5c.4 性能对比
+
+| 版本 | 加载机制 | 每轮等 | 命中方式 | 耗时 | 比 §32 原版 |
+|:--|:--|:--|:--|:--|:--|
+| §32 原版 | dispatch + fallback scroll loop | 800ms | poll | ~9s | — |
+| §32.5 方案 A | scroll loop + poll | 300ms | poll | ~5.5s | 1.6× |
+| §32.5c 方案 C | scroll loop + observer | 100ms | observer 实时 | ~3.1s | **2.9×** |
+
+方案 C 比方案 A 快一倍，比 §32 原版快三倍。耗时 ~3.1s（scroll loop 16×100ms + 1500ms 稳定）。
+
+### 32.5c.5 构建产物
+
+```
+dist/index.js  50.69 KB  (gzip: 14.84 kB)
+```
+
+
 
