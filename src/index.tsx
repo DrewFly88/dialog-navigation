@@ -245,8 +245,13 @@ try {
             // Fetched 879 在 scroll loop 之后),re-render 替换 precisionTarget 指向的
             // DOM 节点 → 后续 scrollIntoView/addClass 在已脱离 DOM 树的旧节点上操作,
             // 滚到整个气泡而非结论元素。等 1500ms 让 re-fetch 完成后 DOM 稳定再精准段。
+            // §32.5c+2: 远距离目标(如气泡 60)卡片骨架插入后内部内容(<strong>/<li> 候选)
+            // 是异步渲染的——立即精准段 querySelectorAll 抓不全候选导致命中失败。
+            // 1500ms 之后再加 rAF ×2 让 content-visibility 布局完成,候选元素全部就绪。
             if (target) {
               await new Promise((r) => setTimeout(r, 1500));
+              await new Promise((r) => requestAnimationFrame(r));
+              await new Promise((r) => requestAnimationFrame(r));
               // Detect header overlayer height for scroll offset.
               // Without this, scrollIntoView's "start" aligns with viewport
               // top, hiding the target behind the fixed header.
