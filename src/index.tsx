@@ -183,30 +183,41 @@ try {
             if (!target) {
               setIsNavigating(true);
               try {
-                // §32.5: scroll loop 主加载机制(fiber dispatch 在本环境失效——
-                // DEVLOG §15/§18 早有定论:dispatch 改 SDK page 值但不渲染远端卡)。
-                // §32 原版的 await 1500ms 不只是等 dispatch,副作用地给了 SDK 500ms 轮询
-                // re-fetch 一个完整窗口——re-fetch 完成后 DOM 稳定,scroll loop 加载完
-                // 剩余卡后 DOM 仍稳定,精准段命中的 DOM 节点是新鲜的。
-                // §32.5 v3 误删这 1500ms,scroll loop 刚跑完 SDK re-fetch 恰好触发,
-                // re-render 替换了 precisionTarget 指向的 DOM 节点,后续 scrollIntoView 和
-                // addClass 在已脱离 DOM 树的旧节点上操作 → 滚到整个气泡而非结论元素。
-                // 修复:恢复 await 1500ms 稳定窗口 + scroll loop 每轮 300ms + stall 5 次放弃。
+                // §32.5c: scroll loop + MutationObserver 实时回调(方案 C)。
+                // fiber dispatch 在本环境失效(DEVLOG §15/§18 定论),scroll loop 是唯一可用通道。
+                // observer 盂 bubbleList childList 变化——SDK 渲染新卡时立即回调检查 target,
+                // 不等每轮 100ms poll 超时,命中即停。每轮等缩到 100ms(poll 兜底)。
+                let settled = false;
+                const finishLoad = () => {
+                  if (settled) return;
+                  settled = true;
+                  ob.disconnect();
+                };
+                const ob = new MutationObserver(() => {
+                  const t = getTarget();
+                  if (t) { target = t; finishLoad(); }
+                });
+                ob.observe(bubbleList, { childList: true, subtree: false });
                 let prevCount = Array.from(bubbleList.children).filter(
                   (el) => el.classList.contains("qwenpaw-bubble-start") ||
                           el.classList.contains("qwenpaw-bubble-end")
                 ).length;
                 let stallCount = 0;
-                for (let attempt = 0; attempt < 30; attempt++) {
+                for (let attempt = 0; attempt < 30 && !settled; attempt++) {
                   const loadMore = bubbleList.querySelector(
                     ".qwenpaw-bubble-list-load-more"
                   ) as HTMLElement | null;
                   if (!loadMore) break;
                   loadMore.scrollIntoView({ block: "start" });
-                  await new Promise((r) => setTimeout(r, 300));
+                  await new Promise((r) => setTimeout(r, 100));
+                  if (settled) {
+                    console.log(LOG, `target found after ${attempt+1} scroll loads (observer)`);
+                    break;
+                  }
                   target = getTarget();
                   if (target) {
-                    console.log(LOG, `target found after ${attempt+1} scroll loads`);
+                    console.log(LOG, `target found after ${attempt+1} scroll loads (poll)`);
+                    finishLoad();
                     break;
                   }
                   const newCount = Array.from(bubbleList.children).filter(
@@ -224,6 +235,7 @@ try {
                   }
                   prevCount = newCount;
                 }
+                ob.disconnect();
               } finally {
                 setIsNavigating(false);
               }
