@@ -209,7 +209,9 @@ try {
                   ) as HTMLElement | null;
                   if (!loadMore) break;
                   loadMore.scrollIntoView({ block: "start" });
-                  await new Promise((r) => setTimeout(r, 100));
+                  // §32.5d: 每轮等 200ms——SDK re-fetch 间隙卡数短暂不变,100ms 太短跨不过
+                  // 间隙误判 stall,200ms 给 re-fetch 完成窗口(re-fetch 实测 ~150-300ms)
+                  await new Promise((r) => setTimeout(r, 200));
                   if (settled) {
                     console.log(LOG, `target found after ${attempt+1} scroll loads (observer)`);
                     break;
@@ -226,8 +228,10 @@ try {
                   ).length;
                   if (newCount === prevCount) {
                     stallCount++;
-                    if (stallCount >= 5) {
-                      console.warn(LOG, `scroll loop stalled 5x, giving up at attempt ${attempt+1}`);
+                    // §32.5d: stall 5 → 8——SDK re-fetch 间隙卡数短暂不变,连续多次误判
+                    // 放弃太早(reload 后冷启动间隙更频繁)。8 次给 re-fetch 完成足够窗口
+                    if (stallCount >= 8) {
+                      console.warn(LOG, `scroll loop stalled 8x, giving up at attempt ${attempt+1}`);
                       break;
                     }
                   } else {
@@ -313,7 +317,9 @@ try {
                     // §31: 跳过 agent 引用 user 原话的 li(含"授权我"、"你会照做"等
                     // 用户口吻被 agent 引用的列表项)——parser 按 msg.type!=="message"
                     // 跳过了它们,DOM 端也必须跳过才能让候选序号与 parser childIndex 一致。
-                    const verdict = /[✅⛔❌✓✗]|[通过|失败|正确|错误|成功|完美|通关]/;
+                    // §32.5d: 原正则 `[通过|失败|正确|错误|成功|完美|通关]` 误用字符类——含「完」「美」「通」
+                    // 等单字任一即命中,导致"完全不提文件名"(含「完」)被误判为结论。改分组 `(...)` 匹配整词。
+                    const verdict = /[✅⛔❌✓✗]|(通过|失败|正确|错误|成功|完美|通关)/;
                     const conclusionMarker = /^(结论|总结|最终|结果|答案|核心|关键|总的来说|综上|最终结论|要点|发现|结论是|总结一下|Conclusion|Summary|Result|Answer|Key|Finding|Finally)/;
                     const doneRe = /^已(创建|修复|完成|修改|设置|找到|解决|实现|添加|删除|更新)/;
                     const doneEnRe = /^(Done|Completed|Fixed|Created|Resolved|Updated|Added|Removed)/;
@@ -327,10 +333,10 @@ try {
                     // §32: 按 parser 三优先级分抓 DOM 候选——strong(bold)→numbered li→普通 li
                     // 但 DOM <strong> 含 SDK 渲染样式加粗(「名字：」「定位：」等字段标签),
                     // 非 parser 端 BOLD_RE 抓的源 markdown **xxx** 加粗——序号错位根因。
-                    // 筛掉短字段标签类(≤8字+冒号),只保留内容性加粗与 parser 对齐。
-                    const tagPattern = /^[^：:]{1,8}[：:]/;
-                    const boldEls = Array.from(target.querySelectorAll<HTMLElement>('strong'))
-                      .filter(el => !tagPattern.test((el.textContent || '').trim()));
+                    // §32.5d: 原用 tagPattern 筛「≤8字+冒号」字段标签,但「✅ 进步了：」「❌ 但找错了文件：」
+                    // 含冒号也被误筛。删 tagPattern 让 isC2 独筛——isC2 按 C2 白名单判据(含结论特征)
+                    // 筛真实结论,「名字：」等字段标签无结论特征被 isC2 跳过,序号与 parser childIdx 对齐。
+                    const boldEls = Array.from(target.querySelectorAll<HTMLElement>('strong'));
                     const liEls = Array.from(target.querySelectorAll<HTMLElement>('li'));
                     const numberedEls = liEls.filter(el => numberedLi.test((el.textContent || '').trim()));
                     const plainLiEls = liEls.filter(el => !numberedLi.test((el.textContent || '').trim()));

@@ -45,7 +45,9 @@ const CONCLUSION_MARKER_RE = /^(结论|总结|最终|结果|答案|核心|关键
 const CONCLUSION_MARKER_EN_RE = /^(Conclusion|Summary|Result|Answer|Key|Finding|Finally|In summary|To summarize|Overall|The result)/;
 // 判断/状态符号 — 只保留强判断词与符号，去掉"创建/修复/完成/解决"等中性动词，
 // 否则"创建 session"、"第一轮：创建文件"等步骤标题会被误判为结论。
-const VERDICT_RE = /[✅⛔❌✓✗]|[通过|失败|正确|错误|成功|完美|通关]/;
+// §32.5d: 原正则 `[通过|失败|正确|错误|成功|完美|通关]` 误用字符类——含「完」「美」「通」
+// 等单字任一即命中,导致"完全不提文件名"(含「完」)被误判为结论。改分组 `(...)` 匹配整词。
+const VERDICT_RE = /[✅⛔❌✓✗]|(通过|失败|正确|错误|成功|完美|通关)/;
 // 完成态表述 — 保留"已..."开头（完成态过去式），仍是结论特征
 const DONE_RE = /^已(创建|修复|完成|修改|设置|找到|解决|实现|添加|删除|更新)/;
 const DONE_EN_RE = /^(Done|Completed|Fixed|Created|Resolved|Updated|Added|Removed)/;
