@@ -183,10 +183,9 @@ try {
             if (!target) {
               setIsNavigating(true);
               try {
-                // §32.5c: scroll loop + MutationObserver 实时回调(方案 C)。
-                // fiber dispatch 在本环境失效(DEVLOG §15/§18 定论),scroll loop 是唯一可用通道。
-                // observer 盂 bubbleList childList 变化——SDK 渲染新卡时立即回调检查 target,
-                // 不等每轮 100ms poll 超时,命中即停。每轮等缩到 100ms(poll 兜底)。
+                // §32.5c: scroll loop + MutationObserver。observer 盂 bubbleList
+                // childList 变化——SDK 渲染新卡时立即回调检查 target,不等每轮 100ms
+                // poll 超时,命中即停。每轮等 100ms(poll 兜底),stall 5 次放弃。
                 let settled = false;
                 const finishLoad = () => {
                   if (settled) return;
@@ -209,9 +208,7 @@ try {
                   ) as HTMLElement | null;
                   if (!loadMore) break;
                   loadMore.scrollIntoView({ block: "start" });
-                  // §32.5d: 每轮等 200ms——SDK re-fetch 间隙卡数短暂不变,100ms 太短跨不过
-                  // 间隙误判 stall,200ms 给 re-fetch 完成窗口(re-fetch 实测 ~150-300ms)
-                  await new Promise((r) => setTimeout(r, 200));
+                  await new Promise((r) => setTimeout(r, 100));
                   if (settled) {
                     console.log(LOG, `target found after ${attempt+1} scroll loads (observer)`);
                     break;
@@ -228,10 +225,8 @@ try {
                   ).length;
                   if (newCount === prevCount) {
                     stallCount++;
-                    // §32.5d: stall 5 → 8——SDK re-fetch 间隙卡数短暂不变,连续多次误判
-                    // 放弃太早(reload 后冷启动间隙更频繁)。8 次给 re-fetch 完成足够窗口
-                    if (stallCount >= 8) {
-                      console.warn(LOG, `scroll loop stalled 8x, giving up at attempt ${attempt+1}`);
+                    if (stallCount >= 5) {
+                      console.warn(LOG, `scroll loop stalled 5x, giving up at attempt ${attempt+1}`);
                       break;
                     }
                   } else {
@@ -285,18 +280,23 @@ try {
                   selector = 'strong, li';
                 }
                 if (selector) {
-                  const candidates = target.querySelectorAll<HTMLElement>(selector);
-                  // For tools, deduplicate labels to match parser's call_id dedup
+                  let candidates = target.querySelectorAll<HTMLElement>(selector);
+                  // For tools, use index-based matching (no textContent dedup).
+                  // Parser dedup by call_id (toolCallParser.ts:77-81), which is not
+                  // the same as textContent dedup — the same tool called multiple times
+                  // with the same args gets different call_ids but same label text.
+                  // textContent dedup would skip them, causing matchIdx < childIndex.
                   if (group === 'tool') {
-                    const seen = new Set<string>();
+                    // §32.5e: 兜底——最新卡可能用不同 class 渲染,selector 不匹配。
+                    if (candidates.length === 0) {
+                      candidates = target.querySelectorAll<HTMLElement>('[class*="toolCallCompactSummary"], [class*="toolCallCompact"] summary');
+                    }
                     let matchIdx = 0;
                     for (const el of candidates) {
-                      const txt = (el.textContent || '').trim();
-                      if (txt && !seen.has(txt)) {
-                        seen.add(txt);
+                      if ((el.textContent || '').trim()) {
                         if (matchIdx === childIndex) {
-                          precisionTarget = el.closest('[class*="toolCallCompact"]') as HTMLElement || el;
-                          console.log(LOG, `precision: tool[${childIndex}] matched by unique label`);
+                          precisionTarget = el.closest('details') as HTMLElement || el;
+                          console.log(LOG, `precision: tool[${childIndex}] matched by index`);
                           break;
                         }
                         matchIdx++;
