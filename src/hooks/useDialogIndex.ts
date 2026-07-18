@@ -125,6 +125,10 @@ export function useDialogIndex(hookSessionId: string | null | undefined, agentId
   const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Flag: sidebar event already set chatId, polling should skip redundant reset
   const chatIdSetByEventRef = useRef(false);
+  // §32.5f: 缓存上次拉取的 messages 条数——流式期间内容补充(条数不变)时跳过重建,
+  // 防止 indexData 抖动导致 BarStrip 条目序号变 + 视口跟踪 activeItemId 高亮跳变。
+  // 只有条数变化(新气泡到达)才重建——静默期间的内容补充不触发 debouncedRefresh。
+  const lastMsgCountRef = useRef<number>(0);
   // Trigger counter: increment to force re-resolve
   const [resolveKey, setResolveKey] = useState(0);
 
@@ -171,6 +175,12 @@ export function useDialogIndex(hookSessionId: string | null | undefined, agentId
       }
       const data = await resp.json();
       const messages: QPMessage[] = data.messages || [];
+      // §32.5f: 条数不变则跳过重建——流式期间内容补充(条数不变)时避免 indexData 镤动
+      if (lastMsgCountRef.current > 0 && messages.length === lastMsgCountRef.current) {
+        console.log(LOG, "Skip rebuild: message count unchanged at", messages.length);
+        return;
+      }
+      lastMsgCountRef.current = messages.length;
       console.log(LOG, "Fetched", messages.length, "messages from chat", chatId);
 
       const parsed = parseMessages(messages);
@@ -210,6 +220,7 @@ export function useDialogIndex(hookSessionId: string | null | undefined, agentId
             clearTimeout(retryTimerRef.current);
             retryTimerRef.current = null;
           }
+          lastMsgCountRef.current = 0; // §32.5f fix: 重置 gate 缓存,避免切页面回来后 gate 错误跳过必要拉取
           setIndexData(EMPTY_INDEX);
           setResolveKey((k) => k + 1);
         }
@@ -239,6 +250,7 @@ export function useDialogIndex(hookSessionId: string | null | undefined, agentId
         // Event provides the chat UUID directly — skip resolve entirely
         chatIdRef.current = chatId;
         chatIdSetByEventRef.current = true; // tell polling handler this is already handled
+        lastMsgCountRef.current = 0; // §32.5f fix: 重置 gate 缓存,避免切页面回来后 gate 错误跳过必要拉取
         setIndexData(EMPTY_INDEX);
         setResolveKey((k) => k + 1);
       } else {

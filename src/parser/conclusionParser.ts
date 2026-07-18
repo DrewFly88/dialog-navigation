@@ -139,7 +139,7 @@ export function extractConclusions(messages: QPMessage[]): IndexItem[] {
     const findings = extractStructured(text, true);
     for (const finding of findings) {
       items.push({
-        id: "conclusion-" + items.length,
+        id: "conclusion-" + cardIdx + "-" + childIdx,
         group: "conclusion",
         title: finding.title,
         fullText: finding.fullText,

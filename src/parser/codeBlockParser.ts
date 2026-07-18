@@ -115,7 +115,7 @@ export function extractCodeBlocks(messages: QPMessage[]): IndexItem[] {
         }
 
         items.push({
-          id: "code-" + items.length,
+          id: "code-" + cardIdx + "-" + childIdx,
           group: "code",
           title: smartTruncate(title, 35),
           bubbleIndex: cardIdx,

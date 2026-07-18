@@ -2335,3 +2335,123 @@ if (activeGroup === "conclusion" && closestAgentIdx >= 0) {
 dist/index.js  50.68 KB  (gzip: 14.80 kB)
 ```
 
+---
+
+## §32.5g 实时更新：chat.response.append 触发刷新 + id 穩定化 + 条数 gate（2026-07-12）
+
+### 背景
+
+实测发现新对话气泡到达后条目列表不实时更新——只在切页面回来（组件重建触发 `fetchAndParse`）才更新。原 `useMessageMap` 的 MutationObserver（`subtree: false`）盂不到 SDK 内部 subtree 变化，debouncedRefresh 不触发。
+
+查 `qwenpaw-plugin-dev` skill 的 `frontend-api.md` + 官方文档 `D:\QwenPaw\Lib\site-packages\qwenpaw\docs\plugins.zh.md:571`——发现官方扩展点 `chat.response.append(pluginId, ({ data, isLast }) => ...)`，每条 AI 回复渲染时 SDK 调此回调。本插件漏注册了此扩展点。
+
+### 改动
+
+| 文件 | 改动 |
+|:--|:--|
+| `src/index.tsx` | 模块级加 `refreshRef: { current: (() => void) \| null }` 跨组件桥接；Inner `useEffect` 挂载时 `refreshRef.current = debouncedRefresh`，卸载时清 null；init 注册 `chat?.response?.append(pluginId, () => { refreshRef.current?.(); return null; })`，存 `chatAppendDisposable`，`beforeunload` 时 dispose |
+| `src/hooks/useDialogIndex.ts` | 加 `lastMsgCountRef` 缓存上次拉取条数；`fetchAndParse` 内 gate——`lastMsgCountRef.current > 0 && messages.length === lastMsgCountRef.current` 时跳过重建（防流式期间内容补充的无效重拉）；两处 `setIndexData(EMPTY_INDEX)` 同款重置 `lastMsgCountRef.current = 0`（防切页面回来 gate 错误跳过必要拉取）|
+| `src/parser/conclusionParser.ts` | id 从 `"conclusion-" + items.length` 改为 `"conclusion-" + cardIdx + "-" + childIdx`——与内容位置绑定不随解析顺序变 |
+| `src/parser/topicExtractor.ts` | id 从 `"topic-" + items.length` 改为 `"topic-" + cardIdx` |
+| `src/parser/codeBlockParser.ts` | 两处 id 从 `"code-" + items.length` 改为 `"code-" + cardIdx + "-" + childIdx` |
+| `src/parser/toolCallParser.ts` | id 从 `"tool-" + items.length` 改为 `"tool-" + cardIdx + "-" + childIdx` |
+
+### 实测发现
+
+| 测试 | 结果 | 证据 |
+|:--|:--|:--|
+| `chat.response.append` 注册 | ✅ 成功，disposable 含 dispose | 浏览器手测 `chat.response.append` API 存在且是 function，注册返回 disposable |
+| 回调触发 | ✅ AI 回复期间回调触发 30+ 次 | 捕获 console 日志 `CALLBACK FIRED` 多次 |
+| `isLast` 语义 | ⚠️ 一直 false | 30+ 次回调全 `isLast=false`——SDK 语义非「流式最后一条」，原 `if (isLast) refreshRef.current?.()` gate 拦了所有回调 |
+| 删 isLast gate 后 | ✅ debouncedRefresh + fetchAndParse 真跑 | `Skip rebuild: message count unchanged at 14` 日志证明刷新真触发，gate 合并条数不变的无效重建 |
+| 条目数增 | ✅ topic 从 5 增到 6 | 发「测试实时更新...」消息后，AI 回复期间条目列表含此条消息 |
+
+### id 穩定化收益
+
+原 id `"prefix-" + items.length` 随解析顺序变——流式期间全量重拉后 parser 顺序若变则旧条目 id 变，导致跳转目标错位 + BarStrip `activeItemId` 高亮错位。改用 `cardIdx + "-" + childIdx`（topic 无 childIndex 则只用 cardIdx）后，id 与内容位置绑定不随解析顺序变。
+
+### 条数 gate 设计
+
+`fetchAndParse` 内 `lastMsgCountRef.current > 0 && messages.length === lastMsgCountRef.current` 时跳过重建——只防「条数相同的无效重拉」（流式期间内容补充条数不变），首 次（`=== 0`）必过 gate。两处 `setIndexData(EMPTY_INDEX)`（`checkSession` 内 + sidebar event 内）同款重置 `lastMsgCountRef.current = 0`，避免切页面回来组件重建后 ref 仍缓存旧值导致 gate 错误跳过必要拉取。
+
+### 构建产物
+
+```
+dist/index.js  51.56 KB  (gzip: 15.07 kB)
+```
+
+---
+
+## §32.5h QwenPaw 官方消息锚点功能调研借鉴（2026-07-19）
+
+### 官方实现——antd BubbleList 内置 `userMessageAnchors`
+
+非独立组件，是 antd Pro BubbleList 的内置功能，QwenPaw 只在 `console/src/pages/Chat/OptionsPanel/defaultConfig.ts:13` 配置启：
+
+```typescript
+bubbleList: {
+  userMessageAnchors: {
+    variant: "navigator",  // 唯一配置项——variant
+  },
+},
+```
+
+`console/src/pages/Chat/index.tsx:2695` 合并 defaultConfig + 强制 `variant: "navigator"`，传给 antd BubbleList 的 `theme.bubbleList.userMessageAnchors`。
+
+### DOM 结构（实测）
+
+```
+nav.qwenpaw-chat-anywhere-message-list-anchors-navigator  (right: 351px, 固定右侧)
+├─ button "Scroll to previous user message"  (chevron-up 图标)
+├─ button "Open user message directory"      (list 图标 + count badge "6")
+│  └ 展开后是 6 个条目 button,按时间倒序(最新在上):
+│    "测试实时更新... 7月18日 23:11"
+│    "换个不冷的 7月12日 22:50"
+│    ...
+└─ button "Scroll to next user message"      (chevron-down 图标, disabled 当已到最新)
+```
+
+### 关键 React props（从 fiber 拿）
+
+| prop | 值 | 说明 |
+|:--|:--|:--|
+| `variant` | `"navigator"` | 渲染为 3 按钮 nav（另可选 `default` 等） |
+| `items` | `["0","1",...,"11"]` | 消息位置 key 数组（BubbleList 内部消息索引） |
+| `onEnsureMessageVisible` | `function(A){return O.apply(this,arguments)}` | 跳转回调——滚到目标 user 消息 |
+| `renderedItemsKey` | 时间戳+hash | 渲染批次 key |
+| `scrollContainerClassName` | `qwenpaw-chat-anywhere-message-list-bubbl...` | 滚动容器 class |
+| `enabled` | `true` | 功能开关 |
+
+### 跳转机制
+
+- **prev/next 按钮**：按 `items` 数组顺序滚到上/下一个 user 消息，`onEnsureMessageVisible` 执行滚动
+- **list 按钮**：展开「消息目录」浮层，条目按时间倒序，每条含「消息文本 + 日期时间」，点击同款 `onEnsureMessageVisible` 跳转
+- **count badge**：显示当前 user 消息总数（6）
+- **active 高亮**：当前视口内的 user 消息对应条目加 `anchor-nav-button-active` class
+
+### 与本插件的对比
+
+| 维度 | 官方锚点 | 本插件（dialog-index） |
+|:--|:--|:--|
+| 数据源 | BubbleList 内部 `items`（消息位置 key） | API `/chats/{id}` 拉 `messages[]` + parser |
+| 分组 | 无——只按 user 消息时间序 | 4 分组（topic/tool/code/conclusion） |
+| 跳转目标 | user 消息气泡 | agent 卡片内具体元素（tool call/结论/代码块） |
+| 实时性 | BubbleList 内部状态天然实时 | 需 `chat.response.append` 触发重拉（§32.5g） |
+| 精准定位 | 气泡级（滚到 user 消息） | 元素级（滚到卡片内 `<strong>`/`<li>`/`<details>`） |
+| UI 位置 | 右侧固定 nav | 左侧 BarStrip |
+
+### 借鉴方向
+
+| 可借鉴 | 说明 |
+|:--|:--|
+| **prev/next 导航按钮** | 本插件目前只有条目列表点击跳转，可加 prev/next 按钮在分组内按 `childIndex` 跳上/下一条——低改动高收益 |
+| **条目按时间倒序** | 官方目录条目最新在上——本插件当前 parser 顺序是最旧在上（bi=1 是 tool-0），可考虑加配置切正/倒序 |
+| **active 高亮跟踪** | 官方自动高亮当前视口 user 消息——本插件的 tool 分组有视口跟踪，conclusion 分组缺（§32.5e 待办） |
+| **count badge** | 显示条目总数——本插件 BarStrip 可加总数 badge |
+
+### 不借鉴
+
+| 不借鉴 | 原因 |
+|:--|:--|
+| 改用 antd BubbleList 内置 `userMessageAnchors` | 本插件需 4 分组 + 元素级精准定位，超出内置功能范围 |
+| 气泡级跳转 | 本插件核心价值是「卡片内元素级」跳转，回退气泡级是降级 |

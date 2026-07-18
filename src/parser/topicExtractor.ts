@@ -18,7 +18,7 @@ export function extractTopics(messages: QPMessage[]): IndexItem[] {
         const title = smartTruncate(trimmed, 30);
 
         items.push({
-          id: "topic-" + items.length,
+          id: "topic-" + cardIdx,
           group: "topic",
           title,
           bubbleIndex: cardIdx,

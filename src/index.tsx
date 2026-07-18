@@ -14,7 +14,10 @@ const BUILD = "v0.7.2-20260630";
 try {
   const host = window.QwenPaw?.host;
   const route = window.QwenPaw?.route;
+  const chat = (window as any).QwenPaw?.chat;
   const pluginId = "dialog-navigation";
+  // §32.5g: 跨组件桥接 ref——chat.response.append 回调(隔离 React 子树)触发主树刷新
+  const refreshRef: { current: (() => void) | null } = { current: null };
 
   if (!host) {
     console.error(LOG, "host not available");
@@ -59,6 +62,12 @@ try {
             timer = setTimeout(refresh, 300);
           };
         }, [refresh]);
+
+        // §32.5g: 桥接 refreshRef——chat.response.append 回调(隔离 React 子树)通过此 ref 触发主树刷新
+        useEffect(() => {
+          refreshRef.current = debouncedRefresh;
+          return () => { refreshRef.current = null; };
+        }, [debouncedRefresh]);
 
         const { cardCount: _cc, loadCardsToPosition } = useMessageMap(chatContainerRef, debouncedRefresh, containerReady);
         const [activeBubbleIndex, activeToolIndex] = useViewportTracker(chatContainerRef, totalCards, containerReady);
@@ -431,6 +440,23 @@ try {
       DialogIndexWrapper
     );
 
+    // §32.5g: 注册 chat.response.append——每条 AI 回复渲染时 SDK 调此回调,
+    // 通过 refreshRef 桥接触发主树 debouncedRefresh → fetchAndParse 重拉更新条目列表。
+    // §32.5g fix: 实测 isLast 一直 false(SDK 语义非「流式最后一条」),原 if(isLast) gate
+    // 拦了所有回调 → 条目列表不更新。删 gate,每帧都触发——debouncedRefresh 的 300ms
+    // debounce 合并高频回调,gate(条数不变跳过)再拦无效重建,双重防抖足够。
+    // 回调在隔离 React 子树,不能直接调主树 setter,用 ref 桥接(pitfalls.md 明示的惯用法)。
+    let chatAppendDisposable: { dispose?: () => void } | undefined;
+    try {
+      chatAppendDisposable = chat?.response?.append?.(pluginId, () => {
+        refreshRef.current?.();
+        return null;
+      });
+      console.log(LOG, BUILD, "chat.response.append registered:", !!chatAppendDisposable);
+    } catch (e) {
+      console.warn(LOG, "chat.response.append failed:", e);
+    }
+
     // Register settings page in sidebar
     const menu = (window as any).QwenPaw?.menu;
     const settingsDisposable = route?.add?.(pluginId, {
@@ -450,6 +476,7 @@ try {
     if (typeof window !== "undefined") {
       window.addEventListener("beforeunload", () => {
         disposable?.dispose?.();
+        chatAppendDisposable?.dispose?.();
       });
     }
 

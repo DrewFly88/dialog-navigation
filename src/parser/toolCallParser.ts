@@ -100,7 +100,7 @@ export function extractToolCalls(messages: QPMessage[]): IndexItem[] {
           if (toolName) {
             const title = toolSummary ? toolName + " → " + toolSummary : toolName;
             items.push({
-              id: "tool-" + items.length,
+              id: "tool-" + cardIdx + "-" + childIdx,
               group: "tool",
               title: smartTruncate(title, 35),
               bubbleIndex: cardIdx,
